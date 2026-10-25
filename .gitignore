@@ -1,0 +1,6 @@
+.claude
+.cursor
+.vscode
+venv
+*__pycache__
+/build

@@ -1,0 +1,17 @@
+Шаблон заголовка для исходных файлов vterminal.
+Подставьте правообладателя вместо <Владелец>. Для этого репозитория сейчас: Valery Andreevich Glushchenko.
+
+Первая строка — формулировка заголовка. Вторая — выражение SPDX.
+В Python обе строки начинаются с #.
+
+Copyright (c) 2026 <Владелец>. Dual-licensed under AGPL-3.0 and Commercial License.
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+Пример для файла .py:
+
+# Copyright (c) 2026 Valery Andreevich Glushchenko. Dual-licensed under AGPL-3.0 and Commercial License.
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+LicenseRef-Commercial — это идентификатор SPDX для отдельной коммерческой лицензии.
+В списке SPDX нет лицензии с именем Commercial, поэтому в файлах пишется LicenseRef-Commercial.
+Смысл тот же: AGPL-3.0-only OR Commercial.

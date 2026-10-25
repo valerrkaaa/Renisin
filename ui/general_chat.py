@@ -1,0 +1,745 @@
+# Copyright (c) 2026 Valery Andreevich Glushchenko. Dual-licensed under AGPL-3.0 and Commercial License.
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+"""Общий чат с моделью: вкладки, шапка и список MCP других терминалов.
+
+Пока это кликабельная вёрстка. Сообщения не уходят в модель.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+from uuid import uuid4
+
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QTextCharFormat
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+    QComboBox,
+)
+
+from ui.chat_pane import _CommandRequest, _SelectableText
+from ui.command_card import CommandCard
+from ui.command_input import GrowingText
+
+GENERAL_CHAT_ID = "general-ai-chat"
+GENERAL_CHAT_TITLE = "общий чат для ИИ"
+
+_THINKING = ("Думает", "Думает.", "Думает..", "Думает...")
+
+
+@dataclass
+class _Tab:
+    title: str
+    messages: List[Tuple[str, str]] = field(default_factory=list)
+    model_id: str = ""
+    model_label: str = ""
+    tab_id: str = field(default_factory=lambda: uuid4().hex)
+    draft: str = ""
+    problem: str = ""
+    request: Optional[Tuple[str, str, str, str]] = None
+    # Карточки команд: после скольких сообщений стоят и сам блок.
+    cards: List[Tuple[int, CommandCard]] = field(default_factory=list)
+
+
+class GeneralChatPage(QWidget):
+    command_decided = Signal(str, str, str)
+    send_requested = Signal()
+    stop_requested = Signal()
+    add_tab_requested = Signal()
+    close_tab_requested = Signal(str)
+    rename_tab_requested = Signal(str, str)
+    model_requested = Signal(str, str)
+
+    def __init__(self, mono: QFont | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("generalChat")
+        self._mono = mono or QFont("Consolas")
+        self._request_card: Optional[_CommandRequest] = None
+        self._remote = False
+        self._busy: set[str] = set()
+        self._thinking_phase = 0
+        self._thinking_timer = QTimer(self)
+        self._thinking_timer.setInterval(400)
+        self._thinking_timer.timeout.connect(self._advance_thinking)
+        self._thinking_label: Optional[QLabel] = None
+        self._tabs: List[_Tab] = [_Tab("чат")]
+        self._current = 0
+        self._models: List[Tuple[str, str]] = []
+        self._editing = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        split.addWidget(self._build_chat())
+        split.addWidget(self._build_mcp())
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 0)
+        split.setSizes([760, 220])
+        root.addWidget(split, 1)
+        self._render_tabs()
+        self._render_header()
+        self._render_messages()
+
+    def set_models(self, options: List[Tuple[str, str]]) -> None:
+        """Варианты для вкладок, где модель ещё не выбрана."""
+        self._models = list(options)
+        if self._tabs and not self._tabs[self._current].model_id:
+            self._fill_model_combo()
+
+    def set_mcp_entries(self, entries: List[Tuple[str, str]]) -> None:
+        """Имя для списка и описание, которое видно при наведении."""
+        self._mcp_list.clear()
+        if not entries:
+            item = QListWidgetItem("Нет поднятых MCP")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._mcp_list.addItem(item)
+            return
+        for alias, description in entries:
+            item = QListWidgetItem(alias)
+            item.setToolTip(description.strip())
+            self._mcp_list.addItem(item)
+
+    def append_mcp_cite(self, name: str) -> None:
+        """Короткая цитата MCP в конец черновика. В модель уйдёт имя и описание."""
+        label = " ".join(name.split())
+        if not label:
+            return
+        cite = f"«MCP: {label}»"
+        current = self._draft.text()
+        if current and not current[-1].isspace():
+            current += " "
+        self.set_input_text(current + cite)
+        self._draft.setFocus()
+
+    def _cite_mcp(self, item: QListWidgetItem) -> None:
+        if not (item.flags() & Qt.ItemFlag.ItemIsEnabled):
+            return
+        self.append_mcp_cite(item.text())
+
+    def tab_titles(self) -> List[str]:
+        return [tab.title for tab in self._tabs]
+
+    def current_title(self) -> str:
+        return self._tabs[self._current].title
+
+    def current_model_label(self) -> str:
+        return self._tabs[self._current].model_label
+
+    def current_tab_id(self) -> str:
+        return self._tabs[self._current].tab_id
+
+    def has_tab(self, tab_id: str) -> bool:
+        return any(tab.tab_id == tab_id for tab in self._tabs)
+
+    def focus_tab(self, tab_id: str) -> bool:
+        for index, tab in enumerate(self._tabs):
+            if tab.tab_id != tab_id:
+                continue
+            if index != self._current:
+                self._select_tab(index)
+            return True
+        return False
+
+    def show_command_request(
+        self,
+        tab_id: str,
+        request_id: str,
+        intent: str,
+        command: str,
+        target: str,
+    ) -> None:
+        tab = self._find_tab(tab_id)
+        if tab is None:
+            return
+        tab.request = (request_id, intent, command, target)
+        if self._tabs[self._current].tab_id == tab_id:
+            self._render_messages()
+
+    def clear_command_request(self, tab_id: str = "") -> None:
+        for tab in self._tabs:
+            if not tab_id or tab.tab_id == tab_id:
+                tab.request = None
+        self._render_messages()
+
+    def _build_chat(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 12, 12, 14)
+        layout.setSpacing(12)
+
+        self._tab_bar = QHBoxLayout()
+        self._tab_bar.setSpacing(6)
+        self._tab_host = QWidget()
+        self._tab_host.setLayout(self._tab_bar)
+        layout.addWidget(self._tab_host)
+        layout.addWidget(self._rule())
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        self._title = QLabel()
+        self._title.setObjectName("loungeTitle")
+        header.addWidget(self._title)
+        self._title_edit = QLineEdit()
+        self._title_edit.setObjectName("loungeTitleEdit")
+        self._title_edit.returnPressed.connect(self._commit_title)
+        self._title_edit.editingFinished.connect(self._commit_title)
+        self._title_edit.setVisible(False)
+        header.addWidget(self._title_edit)
+        self._rename = QPushButton()
+        self._rename.setObjectName("iconButton")
+        self._rename.setText("✎")
+        self._rename.setFixedSize(28, 28)
+        self._rename.setToolTip("Переименовать чат")
+        self._rename.clicked.connect(self._begin_rename)
+        header.addWidget(self._rename)
+        header.addStretch(1)
+        self._model_label = QLabel()
+        self._model_label.setObjectName("loungeModel")
+        header.addWidget(self._model_label)
+        self._model_combo = QComboBox()
+        self._model_combo.setObjectName("loungeModelCombo")
+        self._model_combo.setMinimumWidth(180)
+        self._model_combo.activated.connect(self._pick_model)
+        header.addWidget(self._model_combo)
+        layout.addLayout(header)
+        layout.addWidget(self._rule())
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._transcript_host = QWidget()
+        self._transcript = QVBoxLayout(self._transcript_host)
+        self._transcript.setContentsMargins(4, 4, 4, 4)
+        self._transcript.setSpacing(10)
+        self._transcript.addStretch(1)
+        scroll.setWidget(self._transcript_host)
+        self._transcript_scroll = scroll
+        layout.addWidget(scroll, 1)
+
+        self._problem = QLabel()
+        self._problem.setObjectName("loungeProblem")
+        self._problem.setWordWrap(True)
+        self._problem.setVisible(False)
+        layout.addWidget(self._problem)
+
+        box = QFrame()
+        box.setObjectName("inputPanel")
+        row = QHBoxLayout(box)
+        row.setContentsMargins(12, 8, 10, 8)
+        row.setSpacing(8)
+        self._draft = GrowingText()
+        self._draft.setObjectName("loungeDraft")
+        self._draft.setPlaceholderText("Сначала выберите модель")
+        self._draft.submitted.connect(self._on_primary)
+        row.addWidget(self._draft, 1)
+        self._send = QPushButton("Отправить")
+        self._send.setObjectName("sendButton")
+        self._send.setMinimumWidth(120)
+        self._send.clicked.connect(self._on_primary)
+        row.addWidget(self._send, 0, Qt.AlignmentFlag.AlignBottom)
+        layout.addWidget(box)
+        self._sync_composer()
+        return page
+
+    @staticmethod
+    def _rule() -> QFrame:
+        line = QFrame()
+        line.setObjectName("loungeRule")
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        return line
+
+    def _build_mcp(self) -> QWidget:
+        rail = QWidget()
+        rail.setObjectName("mcpRail")
+        rail.setMinimumWidth(180)
+        rail.setMaximumWidth(280)
+        layout = QVBoxLayout(rail)
+        layout.setContentsMargins(14, 16, 14, 14)
+        layout.setSpacing(10)
+        title = QLabel("MCP")
+        title.setObjectName("mcpRailTitle")
+        layout.addWidget(title)
+        hint = QLabel("Подняты в других терминалах")
+        hint.setObjectName("mcpRailHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self._mcp_list = QListWidget()
+        self._mcp_list.setObjectName("mcpList")
+        self._mcp_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._mcp_list.itemDoubleClicked.connect(self._cite_mcp)
+        layout.addWidget(self._mcp_list, 1)
+        return rail
+
+    def _render_tabs(self) -> None:
+        while self._tab_bar.count():
+            item = self._tab_bar.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for index, tab in enumerate(self._tabs):
+            button = QPushButton(tab.title)
+            button.setObjectName("chatTab")
+            button.setProperty("active", "true" if index == self._current else "false")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, number=index: self._select_tab(number))
+            self._style(button)
+            if len(self._tabs) > 1:
+                close = QPushButton("×")
+                close.setObjectName("chatTabClose")
+                close.setFixedSize(18, 18)
+                close.clicked.connect(lambda _checked=False, number=index: self._close_tab(number))
+                wrap = QWidget()
+                row = QHBoxLayout(wrap)
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(2)
+                row.addWidget(button)
+                row.addWidget(close)
+                self._tab_bar.addWidget(wrap)
+            else:
+                self._tab_bar.addWidget(button)
+        plus = QPushButton("+")
+        plus.setObjectName("chatTabAdd")
+        plus.setFixedSize(32, 32)
+        plus.setToolTip("Новая вкладка")
+        plus.clicked.connect(self._add_tab)
+        self._tab_bar.addWidget(plus)
+        self._tab_bar.addStretch(1)
+
+    def _render_header(self) -> None:
+        tab = self._tabs[self._current]
+        self._title.setText(tab.title)
+        self._title.setVisible(not self._editing)
+        self._title_edit.setVisible(self._editing)
+        if tab.model_id:
+            self._model_label.setText(tab.model_label)
+            self._model_label.setVisible(True)
+            self._model_combo.setVisible(False)
+        else:
+            self._model_label.setVisible(False)
+            self._model_combo.setVisible(True)
+            self._fill_model_combo()
+
+    def open_command_card(self, tab_id: str, command: str) -> Optional[CommandCard]:
+        """Блок команды в ленте, как в личном чате. Пока он живой, в него можно вводить текст."""
+        tab = self._find_tab(tab_id)
+        if tab is None:
+            return None
+        card = CommandCard(command, self._mono)
+        card.resend_button.hide()
+        card.delete_button.hide()
+        card.attach_button.hide()
+        card.begin_live()
+        tab.cards.append((len(tab.messages), card))
+        if self.current_tab_id() == tab_id:
+            self._render_messages()
+            self._scroll_bottom()
+        return card
+
+    def feed_command_card(
+        self,
+        tab_id: str,
+        text: str,
+        columns: Optional[int],
+        rows: Optional[int],
+        alternate: bool,
+        persist: bool,
+        stdout: QTextCharFormat,
+        stderr: QTextCharFormat,
+        is_error: bool,
+    ) -> None:
+        card = self._live_card(tab_id)
+        if card is None:
+            return
+        if not persist:
+            card.feed_live(text, columns, rows, alternate)
+        elif card.is_live():
+            card.remember_plain(text)
+        else:
+            card.append_output(text, stderr if is_error else stdout)
+        if self.current_tab_id() == tab_id:
+            self._scroll_bottom()
+
+    def focus_command_card(self, tab_id: str) -> None:
+        card = self._live_card(tab_id)
+        if card is None:
+            return
+        card.focus_terminal()
+        if self.current_tab_id() == tab_id:
+            self._scroll_bottom()
+
+    def finish_command_card(
+        self,
+        tab_id: str,
+        return_code: Optional[int],
+        stdout: QTextCharFormat,
+        exit_fmt: QTextCharFormat,
+    ) -> None:
+        card = self._live_card(tab_id)
+        if card is None:
+            return
+        if card.is_live():
+            plain = card.take_plain()
+            kept = card.end_live()
+            if kept and plain:
+                card.remember_plain(plain)
+            elif plain:
+                card.append_output(plain, stdout)
+        card.finalize(return_code, exit_fmt)
+        if self.current_tab_id() == tab_id:
+            self._render_messages()
+
+    def _live_card(self, tab_id: str) -> Optional[CommandCard]:
+        tab = self._find_tab(tab_id)
+        if tab is None:
+            return None
+        for _index, card in reversed(tab.cards):
+            if card.is_live():
+                return card
+        return None
+
+    def _render_messages(self) -> None:
+        tab = self._tabs[self._current]
+        kept = {card for _index, card in tab.cards}
+        while self._transcript.count() > 1:
+            item = self._transcript.takeAt(0)
+            widget = item.widget()
+            if widget is None or widget in kept:
+                continue
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
+        self._request_card = None
+        if (
+            not tab.messages
+            and tab.request is None
+            and not tab.cards
+            and tab.tab_id not in self._busy
+        ):
+            empty = QLabel("Сообщений пока нет")
+            empty.setObjectName("mcpRailHint")
+            self._transcript.insertWidget(0, empty)
+            return
+        grouped: dict[int, List[CommandCard]] = {}
+        for index, card in tab.cards:
+            grouped.setdefault(index, []).append(card)
+
+        def place_cards(index: int) -> None:
+            for card in grouped.get(index, []):
+                self._transcript.insertWidget(self._transcript.count() - 1, card)
+
+        place_cards(0)
+        for number, (role, text) in enumerate(tab.messages, start=1):
+            self._transcript.insertWidget(
+                self._transcript.count() - 1, self._bubble(role, text)
+            )
+            place_cards(number)
+        self._thinking_label = None
+        waiting = tab.request is not None
+        live = any(card.is_live() for _index, card in tab.cards)
+        if tab.tab_id in self._busy and not waiting and not live:
+            thinking = QLabel(_THINKING[self._thinking_phase])
+            thinking.setObjectName("loungeThinking")
+            self._thinking_label = thinking
+            self._transcript.insertWidget(self._transcript.count() - 1, thinking)
+            self._thinking_timer.start()
+        else:
+            self._thinking_timer.stop()
+        if waiting:
+            request_id, intent, command, target = tab.request
+            card = _CommandRequest(request_id, intent, command, self._mono, target)
+            card.decided.connect(self.command_decided.emit)
+            self._request_card = card
+            self._transcript.insertWidget(self._transcript.count() - 1, card)
+        self._scroll_bottom()
+
+    def _scroll_bottom(self) -> None:
+        """В самый низ. Повтор после раскладки: высота блока появляется не сразу."""
+
+        def go(repeat: bool = True) -> None:
+            try:
+                self._transcript.activate()
+                bar = self._transcript_scroll.verticalScrollBar()
+                bar.setValue(bar.maximum())
+            except RuntimeError:
+                return
+            if repeat:
+                QTimer.singleShot(0, lambda: go(False))
+
+        QTimer.singleShot(0, go)
+
+    def _bubble(self, role: str, text: str) -> QWidget:
+        if role == "result":
+            label = QLabel(text)
+            label.setObjectName("toolOutcome")
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            return label
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = _SelectableText(
+            text,
+            "chatUser" if role == "user" else "chatAssistant",
+            margin=6,
+            left_margin=14,
+        )
+        label.setMaximumWidth(520)
+        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        if role == "user":
+            layout.addStretch(1)
+            layout.addWidget(label)
+        else:
+            layout.addWidget(label)
+            layout.addStretch(1)
+        return row
+
+    def _fill_model_combo(self) -> None:
+        self._model_combo.blockSignals(True)
+        self._model_combo.clear()
+        self._model_combo.addItem("Выберите модель", "")
+        for model_id, label in self._models:
+            self._model_combo.addItem(label, model_id)
+        self._model_combo.setCurrentIndex(0)
+        self._model_combo.blockSignals(False)
+
+    def _select_tab(self, index: int) -> None:
+        if index == self._current or not 0 <= index < len(self._tabs):
+            return
+        self._remember_draft()
+        self._editing = False
+        self._current = index
+        self._show_draft()
+        self._render_tabs()
+        self._render_header()
+        self._render_messages()
+        self._sync_composer()
+
+    def _add_tab(self) -> None:
+        if self._remote:
+            self.add_tab_requested.emit()
+            return
+        self._remember_draft()
+        self._tabs.append(_Tab(title=f"чат {len(self._tabs) + 1}"))
+        self._current = len(self._tabs) - 1
+        self._editing = False
+        self._show_draft()
+        self._render_tabs()
+        self._render_header()
+        self._render_messages()
+        self._sync_composer()
+
+    def _find_tab(self, tab_id: str) -> Optional[_Tab]:
+        for tab in self._tabs:
+            if tab.tab_id == tab_id:
+                return tab
+        return None
+
+    def _close_tab(self, index: int) -> None:
+        if len(self._tabs) < 2 or not 0 <= index < len(self._tabs):
+            return
+        request = self._tabs[index].request
+        tab_id = self._tabs[index].tab_id
+        if self._remote:
+            if request is not None:
+                self.command_decided.emit(request[0], "reject_reason", "вкладка закрыта")
+            self.close_tab_requested.emit(tab_id)
+            return
+        del self._tabs[index]
+        if self._current >= len(self._tabs):
+            self._current = len(self._tabs) - 1
+        elif self._current > index:
+            self._current -= 1
+        self._editing = False
+        self._show_draft()
+        self._render_tabs()
+        self._render_header()
+        self._render_messages()
+        self._sync_composer()
+        if request is not None:
+            self.command_decided.emit(request[0], "reject_reason", "вкладка закрыта")
+
+    def _begin_rename(self) -> None:
+        self._editing = True
+        self._title_edit.setText(self._tabs[self._current].title)
+        self._render_header()
+        self._title_edit.setFocus()
+        self._title_edit.selectAll()
+
+    def _commit_title(self) -> None:
+        if not self._editing:
+            return
+        text = self._title_edit.text().strip()
+        tab_id = self._tabs[self._current].tab_id
+        if self._remote:
+            self._editing = False
+            self._render_header()
+            if text:
+                self.rename_tab_requested.emit(tab_id, text)
+            return
+        if text:
+            self._tabs[self._current].title = text
+        self._editing = False
+        self._render_tabs()
+        self._render_header()
+
+    def _pick_model(self, index: int) -> None:
+        model_id = str(self._model_combo.itemData(index) or "")
+        if not model_id:
+            return
+        tab = self._tabs[self._current]
+        if self._remote:
+            self.model_requested.emit(tab.tab_id, model_id)
+            return
+        tab.model_id = model_id
+        tab.model_label = self._model_combo.itemText(index)
+        self._render_header()
+        self._sync_composer()
+
+    def use_service_tabs(self) -> None:
+        self._remote = True
+
+    def input_text(self) -> str:
+        return self._draft.text()
+
+    def clear_input(self) -> None:
+        self._draft.clear()
+        self._tabs[self._current].draft = ""
+
+    def set_input_text(self, text: str) -> None:
+        self._draft.setText(text)
+        self._tabs[self._current].draft = text
+
+    def set_busy(self, tab_id: str, busy: bool) -> None:
+        if busy:
+            self._busy.add(tab_id)
+        else:
+            self._busy.discard(tab_id)
+        if not self._busy:
+            self._thinking_timer.stop()
+        self._sync_composer()
+        if self.current_tab_id() == tab_id:
+            self._render_messages()
+
+    def set_problem(self, tab_id: str, text: str) -> None:
+        tab = self._find_tab(tab_id)
+        if tab is None:
+            return
+        tab.problem = text
+        if self.current_tab_id() == tab_id:
+            self._problem.setText(text)
+            self._problem.setVisible(bool(text))
+
+    def append_message(self, tab_id: str, role: str, text: str) -> None:
+        tab = self._find_tab(tab_id)
+        if tab is None:
+            return
+        tab.messages.append((role, text))
+        if self.current_tab_id() == tab_id:
+            self._render_messages()
+
+    def set_messages(self, tab_id: str, messages: List[Tuple[str, str]]) -> None:
+        tab = self._find_tab(tab_id)
+        if tab is None:
+            return
+        tab.messages = list(messages)
+        if self.current_tab_id() == tab_id:
+            self._render_messages()
+
+    def set_tabs(self, tabs: List[Tuple[str, str, str, str, List[Tuple[str, str]], str]]) -> None:
+        """id, заголовок, id модели, подпись модели, сообщения, текст ошибки."""
+        self._remember_draft()
+        current = self.current_tab_id() if self._tabs else ""
+        drafts = {tab.tab_id: tab.draft for tab in self._tabs}
+        requests = {tab.tab_id: tab.request for tab in self._tabs}
+        cards = {tab.tab_id: list(tab.cards) for tab in self._tabs}
+        self._tabs = []
+        for tab_id, title, model_id, model_label, messages, problem in tabs:
+            self._tabs.append(
+                _Tab(
+                    title=title,
+                    messages=list(messages),
+                    model_id=model_id,
+                    model_label=model_label,
+                    tab_id=tab_id,
+                    draft=drafts.get(tab_id, ""),
+                    problem=problem,
+                    request=requests.get(tab_id),
+                    cards=cards.get(tab_id, []),
+                )
+            )
+        if not self._tabs:
+            self._tabs = [_Tab("чат")]
+        self._current = 0
+        for index, tab in enumerate(self._tabs):
+            if tab.tab_id == current:
+                self._current = index
+                break
+        self._editing = False
+        self._show_draft()
+        self._render_tabs()
+        self._render_header()
+        self._render_messages()
+        self._sync_composer()
+
+    def _remember_draft(self) -> None:
+        if self._tabs:
+            self._tabs[self._current].draft = self._draft.text()
+
+    def _show_draft(self) -> None:
+        self._draft.setText(self._tabs[self._current].draft)
+
+    def _sync_composer(self) -> None:
+        tab = self._tabs[self._current]
+        busy = tab.tab_id in self._busy
+        self._draft.setReadOnly(busy or not tab.model_id)
+        self._draft.setPlaceholderText(
+            "Сообщение модели. Enter — отправить, Ctrl+Enter или Shift+Enter — новая строка."
+            if tab.model_id
+            else "Сначала выберите модель"
+        )
+        self._send.setEnabled(busy or bool(tab.model_id))
+        if busy:
+            self._send.setText("Остановить")
+            self._send.setObjectName("stopButton")
+        else:
+            self._send.setText("Отправить")
+            self._send.setObjectName("sendButton")
+        self._style(self._send)
+        self._problem.setText(tab.problem)
+        self._problem.setVisible(bool(tab.problem))
+
+    def _on_primary(self) -> None:
+        if self.current_tab_id() in self._busy:
+            self.stop_requested.emit()
+            return
+        if not self._tabs[self._current].model_id:
+            return
+        if not self._draft.text().strip():
+            return
+        self.send_requested.emit()
+
+    def _advance_thinking(self) -> None:
+        self._thinking_phase = (self._thinking_phase + 1) % len(_THINKING)
+        label = self._thinking_label
+        if label is not None:
+            label.setText(_THINKING[self._thinking_phase])
+
+    def _style(self, widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
