@@ -26,6 +26,7 @@ from application.terminal_mcp import (
     promote_shell_actions,
     refusal,
     refusal_reason,
+    split_shell_commands,
 )
 from drivers.llm import LlmToolCall, LlmTurn, LmStudioClient
 from mcp_host import TerminalMcpServer
@@ -434,6 +435,7 @@ class McpCommandTests(unittest.TestCase):
         )
         self.assertEqual(gate.asks[0].intent, "удалить")
         self.assertEqual(gate.asks[0].command, "rm x")
+        self.assertEqual(gate.asks[0].parts, ("rm x",))
         self.assertEqual(gate.asks[0].origin_id, "")
         self.assertNotIn("rm x", driver.sent)
 
@@ -972,6 +974,91 @@ class ClientToolTests(unittest.TestCase):
             thread.join(timeout=2)
 
 
+class CommandSplitTests(unittest.TestCase):
+    def test_unix_splits_semicolons_and_keeps_chains(self) -> None:
+        self.assertEqual(
+            split_shell_commands("apt install; apt update", "unix"),
+            ("apt install", "apt update"),
+        )
+        self.assertEqual(
+            split_shell_commands("cmd1 && cmd2 || cmd3", "unix"),
+            ("cmd1 && cmd2 || cmd3",),
+        )
+        self.assertEqual(
+            split_shell_commands("cmd4 | grep x", "unix"),
+            ("cmd4 | grep x",),
+        )
+        self.assertEqual(
+            split_shell_commands(
+                'echo "a; b"; cmd1 && cmd2 || cmd3; cmd4 | grep x',
+                "unix",
+            ),
+            ('echo "a; b"', "cmd1 && cmd2 || cmd3", "cmd4 | grep x"),
+        )
+        self.assertEqual(
+            split_shell_commands("cmd1 &&\ncmd2\ncmd3", "unix"),
+            ("cmd1 &&\ncmd2", "cmd3"),
+        )
+
+    def test_windows_splits_ampersand_not_conditional(self) -> None:
+        self.assertEqual(
+            split_shell_commands("dir & echo hi", "windows"),
+            ("dir", "echo hi"),
+        )
+        self.assertEqual(
+            split_shell_commands("dir && echo hi || echo no", "windows"),
+            ("dir && echo hi || echo no",),
+        )
+        self.assertEqual(
+            split_shell_commands("dir >out.txt 2>&1 & echo hi", "windows"),
+            ("dir >out.txt 2>&1", "echo hi"),
+        )
+        self.assertEqual(
+            split_shell_commands('echo "a & b" & echo c', "windows"),
+            ('echo "a & b"', "echo c"),
+        )
+        self.assertEqual(
+            split_shell_commands("echo a; echo b", "windows"),
+            ("echo a; echo b",),
+        )
+
+    def test_other_stays_one_string(self) -> None:
+        self.assertEqual(
+            split_shell_commands("apt install; apt update", "other"),
+            ("apt install; apt update",),
+        )
+
+    def test_ask_keeps_original_text_and_exposes_parts(self) -> None:
+        service, driver, profiles = _world()
+        info = _session(service, profiles)
+        service.update_session_settings(
+            info.session_id,
+            info.name,
+            "",
+            "",
+            shell_family="unix",
+        )
+        gate = _Gate(CommandAnswer("run"))
+        service.set_command_approver(gate.ask)
+        service.run_mcp_command(info.session_id, "обновить", "apt install; apt update")
+        self.assertEqual(gate.asks[0].command, "apt install; apt update")
+        self.assertEqual(gate.asks[0].parts, ("apt install", "apt update"))
+        self.assertEqual(driver.sent[-1], "apt install; apt update")
+
+        service.update_session_settings(
+            info.session_id, info.name, "", "", shell_family="windows"
+        )
+        service.run_mcp_command(info.session_id, "список", "dir & echo hi")
+        self.assertEqual(gate.asks[-1].parts, ("dir", "echo hi"))
+        self.assertEqual(driver.sent[-1], "dir & echo hi")
+
+        service.update_session_settings(
+            info.session_id, info.name, "", "", shell_family="other"
+        )
+        service.run_mcp_command(info.session_id, "как есть", "echo a; echo b")
+        self.assertEqual(gate.asks[-1].parts, ("echo a; echo b",))
+
+
 class ChatCardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -982,7 +1069,7 @@ class ChatCardTests(unittest.TestCase):
 
     def test_four_buttons_and_reason_field(self) -> None:
         from PySide6.QtGui import QFont
-        from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
+        from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
 
         from ui.chat_pane import ChatPane
 
@@ -994,9 +1081,11 @@ class ChatCardTests(unittest.TestCase):
         pane.command_decided.connect(lambda *args: seen.append(args))
         pane.show_command_request("id-1", "посмотреть файлы в текущей директории", "ls")
         QApplication.processEvents()
+        self.assertEqual(pane.findChild(QLabel, "shellCode").text(), "Команда: ls")
         buttons = {button.text(): button for button in pane.findChildren(QPushButton)}
-        for title in ("Выполнить", "Всегда выполнять", "Отклонить", "Отклонить по причине"):
+        for title in ("Выполнить", "Добавить правило", "Отклонить", "Отклонить по причине"):
             self.assertIn(title, buttons)
+        self.assertNotIn("Всегда выполнять", buttons)
         field = pane.findChild(QLineEdit, "commandReason")
         self.assertIsNotNone(field)
         assert field is not None
@@ -1007,7 +1096,197 @@ class ChatCardTests(unittest.TestCase):
         field.setText("не надо")
         buttons["Отправить отказ"].click()
         self.assertEqual(seen, [("id-1", "reject_reason", "не надо")])
+        pane.show_command_request(
+            "id-2",
+            "обновить",
+            "apt install; apt update",
+            ("apt install", "apt update"),
+        )
+        QApplication.processEvents()
+        labels = pane.findChildren(QLabel, "shellCode")
+        self.assertEqual(labels[-1].text(), "Команда:\napt install\napt update")
         pane.close()
+
+    def test_add_rule_keeps_the_request_and_refreshes_highlight(self) -> None:
+        from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTextEdit
+
+        from application.command_rules import command_spans
+        from application.terminal_mcp import CommandAsk
+        from storage.command_rules import FileCommandRuleStore
+        from ui.main_window import MainWindow
+        from ui.rules_dialog import PatternDialog
+
+        folder = tempfile.mkdtemp()
+        service, _driver, profiles = _world()
+        service._command_rules = FileCommandRuleStore(
+            os.path.join(folder, "command_rules.json")
+        )
+        profiles.save(domain.LlmProfile(
+            "m-1", "локальная", "http://127.0.0.1:9/v1", "demo"
+        ))
+        info = service.create_session(
+            "работа", "pw", llm_profile_id="m-1", shell_family=domain.SHELL_WINDOWS
+        )
+        window = MainWindow(service)
+        command = "dir /b && echo hi"
+        parts = ("dir /b && echo hi",)
+        prompt = CommandAsk(
+            request_id="id-rule",
+            session_id=info.session_id,
+            intent="список",
+            command=command,
+            parts=parts,
+        )
+        window._mcp_pending[info.session_id] = (prompt, lambda _answer: None)
+        window.chat_pane.show_command_request(
+            prompt.request_id, prompt.intent, command, parts
+        )
+        decided = []
+        window.chat_pane.command_decided.connect(lambda *args: decided.append(args))
+        seen_os: list[str] = []
+
+        def fake_exec(dialog: PatternDialog) -> int:
+            seen_os.extend(item.text() for item in dialog.findChildren(QLabel))
+            dialog._pattern.setText("dir *")
+            dialog._on_save()
+            return int(dialog.result())
+
+        original = PatternDialog.exec
+        PatternDialog.exec = fake_exec  # type: ignore[method-assign]
+        try:
+            window._on_add_command_rule(prompt.request_id)
+        finally:
+            PatternDialog.exec = original  # type: ignore[method-assign]
+        QApplication.processEvents()
+        self.assertIn("ОС: windows", seen_os)
+        self.assertEqual(decided, [])
+        self.assertEqual(
+            service.command_rule_lists()[domain.SHELL_WINDOWS],
+            ("dir *",),
+        )
+        self.assertEqual(service.command_rule_lists()[domain.SHELL_UNIX], ())
+        run = next(
+            button
+            for button in window.chat_pane.findChildren(QPushButton)
+            if button.text() == "Выполнить"
+        )
+        self.assertTrue(run.isEnabled())
+        edit = window.chat_pane.findChild(QTextEdit, "shellCodeRich")
+        self.assertIsNotNone(edit)
+        assert edit is not None
+        cursor = edit.textCursor()
+        cursor.setPosition(len("Команда: ") + 1)
+        self.assertEqual(cursor.charFormat().foreground().color().name(), "#4ade80")
+        cursor.setPosition(len(edit.toPlainText()) - 1)
+        self.assertEqual(cursor.charFormat().foreground().color().name(), "#ececf1")
+        spans = command_spans(
+            command,
+            domain.SHELL_WINDOWS,
+            service._command_rules.rule_set_for(domain.SHELL_WINDOWS),
+        )
+        self.assertTrue(spans[0][0].matched)
+        self.assertFalse(spans[0][-1].matched)
+        self.assertEqual(window._mcp_pending[info.session_id][0].spans, spans)
+        window.close()
+
+    def test_auto_run_shows_the_block_then_executes_a_full_match(self) -> None:
+        from PySide6.QtWidgets import QApplication, QCheckBox, QFrame
+
+        from application.command_rules import TextSpan
+        from application.terminal_mcp import CommandAsk, lounge_origin
+        from ui.general_chat import GENERAL_CHAT_ID
+        from ui.main_window import MainWindow
+
+        service, _driver, profiles = _world()
+        info = _session(service, profiles)
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        tip = "выполнять автоматически при полном совпадении с паттернами"
+        personal = window.chat_pane.findChild(QCheckBox, "autoRun")
+        lounge_box = window._lounge.findChild(QCheckBox, "autoRun")
+        assert personal is not None and lounge_box is not None
+        self.assertTrue(personal.isChecked())
+        self.assertTrue(lounge_box.isChecked())
+        self.assertEqual(personal.text(), "Авто")
+        self.assertEqual(lounge_box.text(), "Авто")
+        self.assertEqual(personal.toolTip(), tip)
+        self.assertEqual(lounge_box.toolTip(), tip)
+
+        full = ((TextSpan("ls", True, True),),)
+        answers: list = []
+        window._present_mcp((
+            CommandAsk(
+                "auto-1", info.session_id, "список", "ls", parts=("ls",), spans=full
+            ),
+            answers.append,
+        ))
+        self.assertIsNotNone(window.chat_pane.findChild(QFrame, "commandRequest"))
+        self.assertEqual(answers, [])
+        QApplication.processEvents()
+        self.assertEqual([item.action for item in answers], ["run"])
+        QApplication.processEvents()
+        self.assertIsNone(window.chat_pane._request_card)
+        self.assertIsNone(window.chat_pane.findChild(QFrame, "commandRequest"))
+
+        personal.setChecked(False)
+        answers.clear()
+        window._present_mcp((
+            CommandAsk(
+                "auto-2", info.session_id, "список", "ls", parts=("ls",), spans=full
+            ),
+            answers.append,
+        ))
+        QApplication.processEvents()
+        self.assertEqual(answers, [])
+        self.assertIsNotNone(window.chat_pane.findChild(QFrame, "commandRequest"))
+
+        personal.setChecked(True)
+        answers.clear()
+        partial = ((
+            TextSpan("grep a", True, True),
+            TextSpan(" && ", False, False),
+            TextSpan("rm x", False, True),
+        ),)
+        window._present_mcp((
+            CommandAsk(
+                "auto-3",
+                info.session_id,
+                "смешать",
+                "grep a && rm x",
+                parts=("grep a && rm x",),
+                spans=partial,
+            ),
+            answers.append,
+        ))
+        QApplication.processEvents()
+        self.assertEqual(answers, [])
+        self.assertIsNotNone(window.chat_pane.findChild(QFrame, "commandRequest"))
+
+        window._activate_session(GENERAL_CHAT_ID)
+        QApplication.processEvents()
+        answers.clear()
+        tab_id = window._lounge.current_tab_id()
+        window._present_mcp((
+            CommandAsk(
+                "auto-4",
+                info.session_id,
+                "список",
+                "ls",
+                origin_id=lounge_origin(tab_id),
+                parts=("ls",),
+                spans=full,
+            ),
+            answers.append,
+        ))
+        self.assertIsNotNone(window._lounge.findChild(QFrame, "commandRequest"))
+        QApplication.processEvents()
+        self.assertEqual([item.action for item in answers], ["run"])
+        QApplication.processEvents()
+        self.assertIsNone(window._lounge._tabs[window._lounge._current].request)
+        self.assertIsNone(window._lounge.findChild(QFrame, "commandRequest"))
+        window.close()
 
     def test_window_shows_request_from_background_thread(self) -> None:
         from PySide6.QtWidgets import QApplication, QLabel, QPushButton

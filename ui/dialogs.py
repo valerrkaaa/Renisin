@@ -134,6 +134,7 @@ class NewSessionRequest:
     auth_secret: Optional[str]
     hop_secrets: tuple[str, ...] = ()
     llm_profile_id: Optional[str] = None
+    shell_family: str = domain.SHELL_UNIX
 
 
 class _SessionCallDialog(QDialog):
@@ -231,6 +232,19 @@ class CreateSessionDialog(_SessionCallDialog):
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Например: Рабочая CMD")
         basic_form.addRow("Имя сессии", self.name_edit)
+
+        self.shell_combo = QComboBox()
+        self.shell_combo.addItem("linux/macOS", domain.SHELL_UNIX)
+        self.shell_combo.addItem("windows", domain.SHELL_WINDOWS)
+        self.shell_combo.addItem("other", domain.SHELL_OTHER)
+        self.shell_combo.setToolTip(
+            "Как делить команду в запросе. Для SSH через SSH — ОС последнего узла."
+        )
+        basic_form.addRow("ОС", self.shell_combo)
+        self._shell_hint = QLabel("Для цепочки это ОС последнего узла, где выполняются команды.")
+        self._shell_hint.setWordWrap(True)
+        self._shell_hint.setStyleSheet("color:#8b949e;")
+        basic_form.addRow("", self._shell_hint)
 
         layout.addLayout(basic_form)
 
@@ -418,6 +432,7 @@ class CreateSessionDialog(_SessionCallDialog):
         self._llm_container.setVisible(is_llm)
         self._ssh_container.setVisible(is_ssh)
         self._chain_container.setVisible(is_chain)
+        self._shell_hint.setVisible(is_chain)
         self.name_edit.setPlaceholderText(
             "Например: prod-web" if is_ssh or is_chain else "Например: Рабочая CMD"
         )
@@ -425,6 +440,9 @@ class CreateSessionDialog(_SessionCallDialog):
         if not self._busy and self._ok_button is not None:
             blocked = is_llm and self.profile_combo.count() == 0
             self._ok_button.setEnabled(not blocked)
+
+    def _shell_family(self) -> str:
+        return str(self.shell_combo.currentData() or domain.SHELL_UNIX)
 
     def _on_auth_changed(self) -> None:
         method = self.ssh_auth.currentData()
@@ -537,6 +555,7 @@ class CreateSessionDialog(_SessionCallDialog):
                 ssh=None,
                 auth_secret=None,
                 llm_profile_id=llm_profile_id,
+                shell_family=self._shell_family(),
             )
         elif provider_key == "ssh_over_ssh":
             built = self._chain_request(name, pw, llm_profile_id)
@@ -581,6 +600,7 @@ class CreateSessionDialog(_SessionCallDialog):
                 ),
                 auth_secret=secret,
                 llm_profile_id=llm_profile_id,
+                shell_family=self._shell_family(),
             )
 
         secret = request.auth_secret
@@ -595,6 +615,7 @@ class CreateSessionDialog(_SessionCallDialog):
                     auth_secret=secret,
                     hop_secrets=request.hop_secrets,
                     llm_profile_id=request.llm_profile_id,
+                    shell_family=request.shell_family,
                 )
             finally:
                 request.auth_secret = None
@@ -667,6 +688,7 @@ class CreateSessionDialog(_SessionCallDialog):
             auth_secret=first_secret,
             hop_secrets=tuple(secrets),
             llm_profile_id=llm_profile_id,
+            shell_family=self._shell_family(),
         )
 
 

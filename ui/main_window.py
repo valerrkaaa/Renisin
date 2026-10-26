@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Set
 import os
 import threading
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 import domain
 from application import ApplicationService
 from application.service import LlmUnavailable
+from application.command_rules import fully_allowed
 from application.terminal_mcp import CommandAnswer, CommandAsk, lounge_tab_id
 from shell_takeover import looks_like_secret_prompt
 from ui.chat_pane import ChatPane
@@ -55,6 +56,7 @@ from ui.edit_dialog import FileEditDialog
 from ui.icons import gear_icon, paste_icon, paste_run_icon
 from ui.session_settings import SessionSettingsDialog
 from ui.models_dialog import ModelsDialog
+from ui.rules_dialog import PatternDialog, RulesDialog
 from ui.styles import STYLESHEET, TextFormats, build_text_formats
 from ui.hostkey import QtHostKeyVerifier
 
@@ -414,6 +416,8 @@ class MainWindow(QMainWindow):
         self._mcp_ask.connect(self._present_mcp)
         self.chat_pane.command_decided.connect(self._on_command_decided)
         self._lounge.command_decided.connect(self._on_command_decided)
+        self.chat_pane.rule_requested.connect(self._on_add_command_rule)
+        self._lounge.rule_requested.connect(self._on_add_command_rule)
         self._lounge_done.connect(self._on_lounge_done)
         self._bind_lounge()
         hook = getattr(self._service, "set_command_approver", None)
@@ -467,6 +471,15 @@ class MainWindow(QMainWindow):
         )
         self.models_button.clicked.connect(self._on_models)
         layout.addWidget(self.models_button)
+
+        self.rules_button = QPushButton("Правила")
+        self.rules_button.setObjectName("secondaryButton")
+        self.rules_button.setToolTip(
+            "Шаблоны команд, которые выполняются без вопроса.\n"
+            "У linux/macOS, Windows и other свои списки."
+        )
+        self.rules_button.clicked.connect(self._on_rules)
+        layout.addWidget(self.rules_button)
 
         self.group_button = QPushButton("Создать группу")
         self.group_button.setObjectName("secondaryButton")
@@ -967,6 +980,9 @@ class MainWindow(QMainWindow):
             return "  ·  модель"
         return f"  ·  {profile.name}"
 
+    def _on_rules(self) -> None:
+        RulesDialog(self._service, self).exec()
+
     def _on_models(self) -> None:
         dialog = ModelsDialog(self._service, self)
         dialog.exec()
@@ -1301,6 +1317,7 @@ class MainWindow(QMainWindow):
                 dialog.os_name(),
                 dialog.username(),
                 dialog.ip_addresses(),
+                dialog.shell_family(),
             )
         except Exception as exc:
             QMessageBox.warning(self, "Не удалось сохранить настройки", str(exc))
@@ -2350,7 +2367,10 @@ class MainWindow(QMainWindow):
                 prompt.intent,
                 prompt.command,
                 info.mcp_alias.strip() or info.name,
+                prompt.parts,
+                prompt.spans,
             )
+            self._queue_pattern_run(prompt)
             return
         if not info.llm_profile_id:
             finish(CommandAnswer("reject_reason", "у активной сессии нет чата для подтверждения"))
@@ -2371,7 +2391,84 @@ class MainWindow(QMainWindow):
             self.chat_pane.clear_command_request()
             return
         prompt, _finish = item
-        self.chat_pane.show_command_request(prompt.request_id, prompt.intent, prompt.command)
+        self.chat_pane.show_command_request(
+            prompt.request_id,
+            prompt.intent,
+            prompt.command,
+            prompt.parts,
+            prompt.spans,
+        )
+        self._queue_pattern_run(prompt)
+
+    def _queue_pattern_run(self, prompt: CommandAsk) -> None:
+        """Полное совпадение с шаблонами: блок уже на экране, выполнение без клика."""
+        if not fully_allowed(prompt.spans):
+            return
+        tab_id = lounge_tab_id(prompt.origin_id)
+        enabled = (
+            self._lounge.auto_run_on_match()
+            if tab_id
+            else self.chat_pane.auto_run_on_match()
+        )
+        if not enabled:
+            return
+        request_id = prompt.request_id
+        QTimer.singleShot(0, lambda: self._run_matched_request(request_id))
+
+    def _run_matched_request(self, request_id: str) -> None:
+        prompt = None
+        for item in self._mcp_pending.values():
+            if item[0].request_id == request_id:
+                prompt = item[0]
+                break
+        if prompt is None or not fully_allowed(prompt.spans):
+            return
+        tab_id = lounge_tab_id(prompt.origin_id)
+        enabled = (
+            self._lounge.auto_run_on_match()
+            if tab_id
+            else self.chat_pane.auto_run_on_match()
+        )
+        if not enabled:
+            return
+        self._on_command_decided(request_id, "run", "")
+
+    def _on_add_command_rule(self, request_id: str) -> None:
+        found = None
+        pending_key = ""
+        for session_id, item in self._mcp_pending.items():
+            if item[0].request_id == request_id:
+                found = item
+                pending_key = session_id
+                break
+        if found is None:
+            return
+        prompt = found[0]
+        getter = getattr(self._service, "get_session", None)
+        info = getter(prompt.session_id) if callable(getter) else None
+        family = domain.normalize_shell_family(
+            getattr(info, "shell_family", "") if info is not None else ""
+        )
+        labels = {
+            domain.SHELL_UNIX: "linux/macOS",
+            domain.SHELL_WINDOWS: "windows",
+            domain.SHELL_OTHER: "other",
+        }
+        dialog = PatternDialog(labels[family], self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self._service.add_command_rule(family, dialog.pattern())
+            parts, spans = self._service.command_preview(prompt.session_id, prompt.command)
+        except Exception as exc:
+            QMessageBox.warning(self, "Правило", str(exc) or "не удалось сохранить правило")
+            return
+        self._mcp_pending[pending_key] = (
+            replace(prompt, parts=parts, spans=spans),
+            found[1],
+        )
+        self.chat_pane.update_command_preview(request_id, parts, spans)
+        self._lounge.update_command_preview(request_id, parts, spans)
 
     def _on_command_decided(self, request_id: str, action: str, reason: str) -> None:
         found = None

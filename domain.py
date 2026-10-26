@@ -19,6 +19,21 @@ EventId = str
 CredentialRef = str
 ProfileId = str
 
+# Как делить текст команды в запросе. В терминал уходит исходная строка.
+SHELL_UNIX = "unix"
+SHELL_WINDOWS = "windows"
+SHELL_OTHER = "other"
+
+
+def normalize_shell_family(value: str) -> str:
+    """linux/macOS, windows или other. Неизвестное значение — linux/macOS."""
+    text = (value or "").strip().lower().replace(" ", "")
+    if text in {SHELL_WINDOWS, "win", "cmd"}:
+        return SHELL_WINDOWS
+    if text in {SHELL_OTHER, "другая"}:
+        return SHELL_OTHER
+    return SHELL_UNIX
+
 
 def new_session_id() -> SessionId:
     return f"s-{uuid4().hex}"
@@ -265,6 +280,8 @@ class SessionInfo:
     # Адреса машины и имя пользователя. Не часть описания.
     ip_addresses: str = ""
     username: str = ""
+    # ОС, выбранная при создании: от неё зависят разделители команд в запросе.
+    shell_family: str = SHELL_UNIX
 
 
 @dataclass(frozen=True)

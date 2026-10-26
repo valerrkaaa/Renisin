@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -37,6 +38,16 @@ class SessionSettingsDialog(QDialog):
         self._description.setPlaceholderText("Что это за терминал")
         self._description.setFixedHeight(72)
         form.addRow("Описание", self._description)
+        self._shell = QComboBox()
+        self._shell.addItem("linux/macOS", domain.SHELL_UNIX)
+        self._shell.addItem("windows", domain.SHELL_WINDOWS)
+        self._shell.addItem("other", domain.SHELL_OTHER)
+        selected = self._shell.findData(domain.normalize_shell_family(info.shell_family))
+        self._shell.setCurrentIndex(selected if selected >= 0 else 0)
+        self._shell.setToolTip(
+            "Как делить команду в запросе. В терминал уходит исходный текст."
+        )
+        form.addRow("ОС команд", self._shell)
         self._os = QLineEdit(info.os_name)
         self._os.setPlaceholderText("Определится при запуске терминала")
         form.addRow("ОС", self._os)
@@ -65,6 +76,9 @@ class SessionSettingsDialog(QDialog):
 
     def mcp_description(self) -> str:
         return self._description.toPlainText()
+
+    def shell_family(self) -> str:
+        return str(self._shell.currentData() or domain.SHELL_UNIX)
 
     def os_name(self) -> str:
         return self._os.text()

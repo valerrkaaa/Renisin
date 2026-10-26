@@ -56,6 +56,10 @@ class CommandAsk:
     intent: str
     command: str
     origin_id: str = ""
+    # Части для показа. В терминал уходит command целиком.
+    parts: tuple = ()
+    # Строки подтверждения, разрезанные на команды и операторы.
+    spans: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,229 @@ class CommandAnswer:
 
 def normalize_command(command: str) -> str:
     return command.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def split_shell_commands(command: str, family: str) -> tuple:
+    """Разбить текст на команды для показа. Исходная строка не меняется.
+
+    linux/macOS: «;» и перевод строки. windows: «&» и перевод строки.
+    «&&», «||» и конвейер «|» остаются одной командой.
+    other — вся строка одним элементом.
+    """
+    text = normalize_command(command)
+    if not text:
+        return ()
+    kind = (family or "").strip().lower()
+    if kind in {"other", "другая"}:
+        return (text,)
+    separator = "&" if kind in {"windows", "win", "cmd"} else ";"
+    parts = [part.strip() for part in _split_shell(text, separator) if part.strip()]
+    return tuple(parts) if parts else (text,)
+
+
+def _split_shell(text: str, separator: str) -> list:
+    windows = separator == "&"
+    parts: list = []
+    buf: list = []
+    index = 0
+    length = len(text)
+    quote = ""
+    backtick = False
+    paren = 0
+    heredocs: list = []
+    at_line_start = True
+
+    def flush() -> None:
+        parts.append("".join(buf))
+        buf.clear()
+
+    while index < length:
+        if heredocs and at_line_start:
+            end = text.find("\n", index)
+            if end < 0:
+                end = length
+            line = text[index:end]
+            token, strip_tabs = heredocs[0]
+            probe = line.lstrip("\t") if strip_tabs else line
+            buf.append(line)
+            if probe.rstrip("\r") == token:
+                heredocs.pop(0)
+            index = end
+            at_line_start = False
+            continue
+
+        char = text[index]
+        if char == "\n":
+            buf.append(char)
+            index += 1
+            at_line_start = True
+            if quote or backtick or paren or heredocs or _escaped_break(buf, windows):
+                continue
+            if _ends_with_joiner(buf):
+                continue
+            buf.pop()
+            flush()
+            continue
+
+        at_line_start = False
+        if quote:
+            buf.append(char)
+            if windows:
+                if char == '"':
+                    quote = ""
+                index += 1
+                continue
+            if char == "\\" and quote == '"' and index + 1 < length:
+                buf.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+
+        if backtick:
+            buf.append(char)
+            if char == "\\" and index + 1 < length:
+                buf.append(text[index + 1])
+                index += 2
+                continue
+            if char == "`":
+                backtick = False
+            index += 1
+            continue
+
+        if not windows and char == "\\" and index + 1 < length:
+            buf.append(char)
+            buf.append(text[index + 1])
+            index += 2
+            continue
+        if windows and char == "^" and index + 1 < length:
+            buf.append(char)
+            buf.append(text[index + 1])
+            index += 2
+            continue
+
+        if char == '"' or (char == "'" and not windows):
+            quote = char
+            buf.append(char)
+            index += 1
+            continue
+        if not windows and char == "`":
+            backtick = True
+            buf.append(char)
+            index += 1
+            continue
+        if char == "(":
+            paren += 1
+            buf.append(char)
+            index += 1
+            continue
+        if char == ")" and paren:
+            paren -= 1
+            buf.append(char)
+            index += 1
+            continue
+
+        if not windows and text.startswith("<<", index):
+            opened = _read_heredoc_opener(text, index)
+            if opened is not None:
+                token, strip_tabs, next_index = opened
+                buf.append(text[index:next_index])
+                if token:
+                    heredocs.append((token, strip_tabs))
+                index = next_index
+                continue
+
+        # Тело heredoc идёт следующими строками, поэтому «;» на строке
+        # открытия не отрывает его от команды.
+        if heredocs:
+            buf.append(char)
+            index += 1
+            continue
+
+        if paren == 0 and separator == ";" and char == ";":
+            if index + 1 < length and text[index + 1] == ";":
+                buf.append(";;")
+                index += 2
+                continue
+            if index > 0 and text[index - 1] == ";":
+                buf.append(char)
+                index += 1
+                continue
+            flush()
+            index += 1
+            continue
+        if paren == 0 and separator == "&" and char == "&":
+            nxt = text[index + 1] if index + 1 < length else ""
+            prev = text[index - 1] if index else ""
+            if nxt == "&":
+                buf.append("&&")
+                index += 2
+                continue
+            if prev in "<>":
+                buf.append(char)
+                index += 1
+                continue
+            flush()
+            index += 1
+            continue
+
+        buf.append(char)
+        index += 1
+
+    flush()
+    return parts
+
+
+def _escaped_break(buf: list, windows: bool) -> bool:
+    """Перевод строки после \\ или ^ — продолжение, а не новая команда."""
+    body = "".join(buf[:-1])
+    if windows:
+        return body.endswith("^")
+    count = 0
+    index = len(body) - 1
+    while index >= 0 and body[index] == "\\":
+        count += 1
+        index -= 1
+    return count % 2 == 1
+
+
+def _ends_with_joiner(buf: list) -> bool:
+    body = "".join(buf[:-1]).rstrip()
+    return body.endswith("&&") or body.endswith("|")
+
+
+def _read_heredoc_opener(text: str, start: int):
+    """<<WORD на этой строке. None, если это here-string <<<."""
+    index = start + 2
+    strip_tabs = False
+    if index < len(text) and text[index] == "-":
+        strip_tabs = True
+        index += 1
+    if index < len(text) and text[index] == "<":
+        return None
+    while index < len(text) and text[index] in " \t":
+        index += 1
+    if index >= len(text) or text[index] in "\n;|&":
+        return None
+    if text[index] in "'\"":
+        quote = text[index]
+        index += 1
+        token_start = index
+        while index < len(text) and text[index] != quote:
+            index += 1
+        token = text[token_start:index]
+        if index < len(text):
+            index += 1
+        return token, strip_tabs, index
+    token_start = index
+    while index < len(text) and text[index] not in " \t\n;|&<>":
+        index += 1
+    token = text[token_start:index]
+    if not token:
+        return None
+    return token, strip_tabs, index
 
 
 def command_text(arguments: object) -> str:

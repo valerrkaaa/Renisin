@@ -4,13 +4,15 @@
 """Правая колонка чата с моделью. Сеть отсюда не вызывается."""
 from __future__ import annotations
 
+import html
 import math
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QTextCharFormat
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -196,10 +198,106 @@ def _block_text(lines: List[str]) -> str:
     return "\n".join(lines)
 
 
+def command_caption(command: str, parts: Tuple[str, ...] = ()) -> str:
+    """Несколько команд — каждая со своей строки. Одна команда остаётся в строке."""
+    shown = [part.strip() for part in parts if part and part.strip()]
+    if len(shown) <= 1:
+        return f"Команда: {command}"
+    return "Команда:\n" + "\n".join(shown)
+
+
+def command_rich_text(
+    command: str,
+    parts: Tuple[str, ...] = (),
+    spans: Sequence[Sequence[object]] = (),
+) -> Optional[str]:
+    """HTML, если хотя бы одна команда совпала с шаблоном. Иначе обычный текст."""
+    if not spans or not any(
+        bool(getattr(span, "matched", False)) for line in spans for span in line
+    ):
+        return None
+    lines = []
+    for line in spans:
+        bits = []
+        for span in line:
+            escaped = html.escape(str(getattr(span, "text", "")))
+            if getattr(span, "matched", False):
+                bits.append(f'<font color="#4ade80">{escaped}</font>')
+            else:
+                bits.append(escaped)
+        lines.append("".join(bits))
+    body = "<br>".join(lines)
+    shown = [part.strip() for part in parts if part and part.strip()]
+    if len(shown) <= 1 and len(lines) <= 1:
+        return f"Команда: {body}"
+    return "Команда:<br>" + body
+
+
+class _CommandText(QTextEdit):
+    """Текст команды. Совпавшая с шаблоном часть зелёная, операторы — обычные."""
+
+    def __init__(
+        self,
+        mono: QFont,
+        parts: Tuple[str, ...],
+        spans: Sequence[Sequence[object]],
+    ) -> None:
+        super().__init__()
+        self.setObjectName("shellCodeRich")
+        self.setReadOnly(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setFont(mono)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.document().setDocumentMargin(0)
+        self.viewport().setAutoFillBackground(False)
+        self._fitting = False
+        plain = QTextCharFormat()
+        plain.setFont(mono)
+        plain.setForeground(QColor("#ececf1"))
+        hit = QTextCharFormat(plain)
+        hit.setForeground(QColor("#4ade80"))
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        shown = [part.strip() for part in parts if part and part.strip()]
+        prefix = "Команда: " if len(shown) <= 1 and len(spans) <= 1 else "Команда:\n"
+        cursor.insertText(prefix, plain)
+        for index, line in enumerate(spans):
+            if index:
+                cursor.insertText("\n", plain)
+            for span in line:
+                cursor.insertText(
+                    str(getattr(span, "text", "")),
+                    hit if getattr(span, "matched", False) else plain,
+                )
+        cursor.endEditBlock()
+        self._fit()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self) -> None:
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            width = self.viewport().width()
+            if width > 20:
+                self.document().setTextWidth(width)
+            height = int(self.document().size().height()) + 4
+            if self.height() != height:
+                self.setFixedHeight(max(22, height))
+        finally:
+            self._fitting = False
+
+
 class _CommandRequest(QFrame):
     """Подтверждение команды, которую модель хочет выполнить через MCP."""
 
     decided = Signal(str, str, str)
+    rule_requested = Signal(str)
 
     def __init__(
         self,
@@ -208,9 +306,13 @@ class _CommandRequest(QFrame):
         command: str,
         mono: QFont,
         target: str = "",
+        parts: Tuple[str, ...] = (),
+        spans: Sequence[Sequence[object]] = (),
     ) -> None:
         super().__init__()
         self._request_id = request_id
+        self._command = command
+        self._parts = parts
         self.setObjectName("commandRequest")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -228,24 +330,21 @@ class _CommandRequest(QFrame):
         why.setWordWrap(True)
         why.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(why)
-        code = QLabel(f"Команда: {command}")
-        code.setObjectName("shellCode")
-        code.setFont(mono)
-        code.setWordWrap(True)
-        code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(code)
+        self._mono = mono
+        self._code = self._make_preview(parts, spans)
+        layout.addWidget(self._code)
 
         run = QPushButton("Выполнить")
         run.setObjectName("auxButton")
         run.setToolTip("Выполнить команду один раз")
         run.clicked.connect(lambda: self._choose("run", ""))
-        always = QPushButton("Всегда выполнять")
-        always.setObjectName("auxButton")
-        always.setToolTip(
-            "Выполнить и больше не спрашивать эту команду.\n"
-            "Сохраняется только текст команды, без намерения."
+        add_rule = QPushButton("Добавить правило")
+        add_rule.setObjectName("auxButton")
+        add_rule.setToolTip(
+            "Открыть шаблон для ОС этого подключения.\n"
+            "Команда при этом не выполняется."
         )
-        always.clicked.connect(lambda: self._choose("always", ""))
+        add_rule.clicked.connect(lambda: self.rule_requested.emit(self._request_id))
         reject = QPushButton("Отклонить")
         reject.setObjectName("auxButton")
         reject.setToolTip("Отказать без пояснения")
@@ -258,7 +357,7 @@ class _CommandRequest(QFrame):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(run)
-        row.addWidget(always)
+        row.addWidget(add_rule)
         row.addStretch(1)
         layout.addLayout(row)
         second = QHBoxLayout()
@@ -283,7 +382,35 @@ class _CommandRequest(QFrame):
         reason_layout.addWidget(submit)
         self._reason_row.setVisible(False)
         layout.addWidget(self._reason_row)
-        self._buttons = (run, always, reject, explain, submit)
+        self._buttons = (run, add_rule, reject, explain, submit)
+
+    def request_id(self) -> str:
+        return self._request_id
+
+    def set_preview(self, parts: Tuple[str, ...], spans: Sequence[Sequence[object]]) -> None:
+        """Перерисовать команды после нового шаблона."""
+        self._parts = parts
+        layout = self.layout()
+        index = layout.indexOf(self._code)
+        layout.removeWidget(self._code)
+        self._code.deleteLater()
+        self._code = self._make_preview(parts, spans)
+        if index < 0:
+            layout.addWidget(self._code)
+        else:
+            layout.insertWidget(index, self._code)
+
+    def _make_preview(self, parts: Tuple[str, ...], spans: Sequence[Sequence[object]]) -> QWidget:
+        rich = command_rich_text(self._command, parts, spans)
+        if rich is None:
+            code = QLabel(command_caption(self._command, parts))
+            code.setObjectName("shellCode")
+            code.setFont(self._mono)
+            code.setWordWrap(True)
+            code.setTextFormat(Qt.TextFormat.PlainText)
+            code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            return code
+        return _CommandText(self._mono, parts, spans)
 
     def _show_reason(self) -> None:
         self._reason_row.setVisible(True)
@@ -312,6 +439,7 @@ class ChatPane(QWidget):
     apply_edit = Signal(str, str, str)
     reset_requested = Signal()
     command_decided = Signal(str, str, str)
+    rule_requested = Signal(str)
     limit_changed = Signal(int)
 
     def __init__(self, mono: QFont, parent: QWidget | None = None) -> None:
@@ -327,6 +455,13 @@ class ChatPane(QWidget):
         title.setObjectName("sidebarTitle")
         head.addWidget(title)
         head.addStretch(1)
+        self._auto_run = QCheckBox("Авто")
+        self._auto_run.setObjectName("autoRun")
+        self._auto_run.setChecked(True)
+        self._auto_run.setToolTip(
+            "выполнять автоматически при полном совпадении с паттернами"
+        )
+        head.addWidget(self._auto_run)
         self._context = QLabel("")
         self._context.setObjectName("chatContext")
         head.addWidget(self._context)
@@ -496,6 +631,9 @@ class ChatPane(QWidget):
     def focus_input(self) -> None:
         self._input.setFocus()
 
+    def auto_run_on_match(self) -> bool:
+        return self._auto_run.isChecked()
+
     def set_context(self, text: str) -> None:
         self._context.setText(text)
         self._context.setVisible(bool(text))
@@ -539,14 +677,35 @@ class ChatPane(QWidget):
         self._context.style().polish(self._context)
         self.limit_changed.emit(value)
 
-    def show_command_request(self, request_id: str, intent: str, command: str) -> None:
+    def show_command_request(
+        self,
+        request_id: str,
+        intent: str,
+        command: str,
+        parts: Tuple[str, ...] = (),
+        spans: Sequence[Sequence[object]] = (),
+    ) -> None:
         self.clear_command_request()
-        card = _CommandRequest(request_id, intent, command, self._mono)
+        card = _CommandRequest(
+            request_id, intent, command, self._mono, parts=parts, spans=spans
+        )
         card.decided.connect(self.command_decided.emit)
+        card.rule_requested.connect(self.rule_requested.emit)
         self._request_card = card
         self._messages.insertWidget(self._messages.count() - 1, card)
         self.set_thinking(False)
         self._scroll_bottom()
+
+    def update_command_preview(
+        self,
+        request_id: str,
+        parts: Tuple[str, ...],
+        spans: Sequence[Sequence[object]],
+    ) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.set_preview(parts, spans)
 
     def clear_command_request(self) -> None:
         card = self._request_card

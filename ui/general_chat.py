@@ -15,6 +15,7 @@ from uuid import uuid4
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QTextCharFormat
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -49,13 +50,14 @@ class _Tab:
     tab_id: str = field(default_factory=lambda: uuid4().hex)
     draft: str = ""
     problem: str = ""
-    request: Optional[Tuple[str, str, str, str]] = None
+    request: Optional[tuple] = None
     # Карточки команд: после скольких сообщений стоят и сам блок.
     cards: List[Tuple[int, CommandCard]] = field(default_factory=list)
 
 
 class GeneralChatPage(QWidget):
     command_decided = Signal(str, str, str)
+    rule_requested = Signal(str)
     send_requested = Signal()
     stop_requested = Signal()
     add_tab_requested = Signal()
@@ -144,6 +146,9 @@ class GeneralChatPage(QWidget):
     def current_tab_id(self) -> str:
         return self._tabs[self._current].tab_id
 
+    def auto_run_on_match(self) -> bool:
+        return self._auto_run.isChecked()
+
     def has_tab(self, tab_id: str) -> bool:
         return any(tab.tab_id == tab_id for tab in self._tabs)
 
@@ -163,11 +168,13 @@ class GeneralChatPage(QWidget):
         intent: str,
         command: str,
         target: str,
+        parts: Tuple[str, ...] = (),
+        spans: tuple = (),
     ) -> None:
         tab = self._find_tab(tab_id)
         if tab is None:
             return
-        tab.request = (request_id, intent, command, target)
+        tab.request = (request_id, intent, command, target, tuple(parts), spans)
         if self._tabs[self._current].tab_id == tab_id:
             self._render_messages()
 
@@ -209,6 +216,13 @@ class GeneralChatPage(QWidget):
         self._rename.clicked.connect(self._begin_rename)
         header.addWidget(self._rename)
         header.addStretch(1)
+        self._auto_run = QCheckBox("Авто")
+        self._auto_run.setObjectName("autoRun")
+        self._auto_run.setChecked(True)
+        self._auto_run.setToolTip(
+            "выполнять автоматически при полном совпадении с паттернами"
+        )
+        header.addWidget(self._auto_run)
         self._model_label = QLabel()
         self._model_label.setObjectName("loungeModel")
         header.addWidget(self._model_label)
@@ -489,12 +503,39 @@ class GeneralChatPage(QWidget):
         else:
             self._thinking_timer.stop()
         if waiting:
-            request_id, intent, command, target = tab.request
-            card = _CommandRequest(request_id, intent, command, self._mono, target)
+            request_id, intent, command, target = tab.request[:4]
+            parts = tab.request[4] if len(tab.request) > 4 else ()
+            spans = tab.request[5] if len(tab.request) > 5 else ()
+            card = _CommandRequest(
+                request_id, intent, command, self._mono, target, parts, spans
+            )
             card.decided.connect(self.command_decided.emit)
+            card.rule_requested.connect(self.rule_requested.emit)
             self._request_card = card
             self._transcript.insertWidget(self._transcript.count() - 1, card)
         self._scroll_bottom()
+
+    def update_command_preview(
+        self,
+        request_id: str,
+        parts: tuple,
+        spans: tuple,
+    ) -> None:
+        for tab in self._tabs:
+            request = tab.request
+            if request is None or request[0] != request_id:
+                continue
+            tab.request = (
+                request[0],
+                request[1],
+                request[2],
+                request[3] if len(request) > 3 else "",
+                tuple(parts),
+                spans,
+            )
+        card = self._request_card
+        if card is not None and card.request_id() == request_id:
+            card.set_preview(parts, spans)
 
     def _scroll_bottom(self) -> None:
         """В самый низ. Повтор после раскладки: высота блока появляется не сразу."""

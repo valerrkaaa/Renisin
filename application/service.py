@@ -4,6 +4,7 @@
 """ApplicationService — сценарии приложения."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import threading
@@ -15,6 +16,7 @@ from uuid import uuid4
 
 import domain
 import file_edit
+from application.command_rules import command_spans
 from application.terminal_mcp import (
     TOOL_NAME,
     INTERACTIVE_REASON,
@@ -27,6 +29,7 @@ from application.terminal_mcp import (
     normalize_command,
     openai_tools,
     command_text,
+    split_shell_commands,
     promote_shell_actions,
     refusal,
     refusal_reason,
@@ -119,6 +122,7 @@ class ApplicationService:
         llm_client: Optional[LlmClient] = None,
         command_allow=None,
         lounge_store=None,
+        command_rules=None,
     ) -> None:
         self._driver_factory = driver_factory
         self._catalog = catalog
@@ -126,6 +130,7 @@ class ApplicationService:
         self._llm = llm_client
         self._journal = journal
         self._command_allow = command_allow
+        self._command_rules = command_rules
         self._lounge_store = lounge_store
         self._lounge_tabs: List[domain.LoungeTab] = []
         self._lounge_command: Dict[str, domain.SessionId] = {}
@@ -419,6 +424,7 @@ class ApplicationService:
         os_name: Optional[str] = None,
         username: Optional[str] = None,
         ip_addresses: Optional[str] = None,
+        shell_family: Optional[str] = None,
     ) -> domain.SessionInfo:
         """Имя сессии, человеческое имя MCP, описание, ОС, пользователь и IP."""
         cleaned = name.strip()
@@ -432,6 +438,11 @@ class ApplicationService:
         system = stored.os_name if os_name is None else os_name.strip()
         user = stored.username if username is None else username.strip()
         addresses = stored.ip_addresses if ip_addresses is None else ip_addresses.strip()
+        family = (
+            stored.shell_family
+            if shell_family is None
+            else domain.normalize_shell_family(shell_family)
+        )
         updated = replace(
             stored,
             name=cleaned,
@@ -440,6 +451,7 @@ class ApplicationService:
             os_name=system,
             username=user,
             ip_addresses=addresses,
+            shell_family=family,
         )
         self._catalog.save(updated)
         with self._lock:
@@ -453,6 +465,7 @@ class ApplicationService:
                     os_name=system,
                     username=user,
                     ip_addresses=addresses,
+                    shell_family=family,
                 )
                 self._sessions[session_id] = current
                 return current
@@ -585,6 +598,7 @@ class ApplicationService:
         auth_secret: Optional[str] = None,
         hop_secrets: tuple[str, ...] = (),
         llm_profile_id: Optional[domain.ProfileId] = None,
+        shell_family: str = domain.SHELL_UNIX,
     ) -> domain.SessionInfo:
         if not name.strip():
             raise ValueError("Имя сессии не может быть пустым")
@@ -627,6 +641,7 @@ class ApplicationService:
             status=domain.SessionStatus.READY,
             ssh=config.ssh,
             llm_profile_id=llm_profile_id,
+            shell_family=domain.normalize_shell_family(shell_family),
         )
         try:
             self._catalog.save(info)
@@ -1530,6 +1545,41 @@ class ApplicationService:
             command,
         )
 
+    def command_rule_lists(self) -> dict:
+        store = self._command_rules
+        if store is None:
+            return {
+                domain.SHELL_UNIX: (),
+                domain.SHELL_WINDOWS: (),
+                domain.SHELL_OTHER: (),
+            }
+        return store.lists()
+
+    def add_command_rule(self, family: str, pattern: str) -> None:
+        store = self._command_rules
+        if store is None:
+            raise RuntimeError("Хранилище правил не подключено")
+        store.add(family, pattern)
+
+    def remove_command_rule(self, family: str, pattern: str) -> None:
+        store = self._command_rules
+        if store is None:
+            raise RuntimeError("Хранилище правил не подключено")
+        store.remove(family, pattern)
+
+    def command_preview(self, session_id: domain.SessionId, command: str) -> tuple:
+        """Строки и подсветка команды с учётом текущих шаблонов её ОС."""
+        info = self.get_session(session_id)
+        family = info.shell_family if info is not None else domain.SHELL_UNIX
+        text = normalize_command(command)
+        return split_shell_commands(text, family), self._command_spans(text, family)
+
+    def _command_spans(self, command: str, family: str) -> tuple:
+        store = self._command_rules
+        if store is None:
+            return ()
+        return command_spans(command, family, store.rule_set_for(family))
+
     def _run_mcp_command(
         self,
         session_id: domain.SessionId,
@@ -1552,6 +1602,8 @@ class ApplicationService:
         allow = self._command_allow
         if allow is not None and allow.allows(session_id, text):
             return self._execute_mcp_command(session_id, text)
+        parts = split_shell_commands(text, info.shell_family)
+        spans = self._command_spans(text, info.shell_family)
         approver = self._approver
         if approver is None:
             return refusal_reason("подтверждение команды недоступно")
@@ -1562,6 +1614,8 @@ class ApplicationService:
                 intent=why,
                 command=text,
                 origin_id=origin,
+                parts=parts,
+                spans=spans,
             )
         )
         action = answer.action
@@ -1805,6 +1859,12 @@ class ApplicationService:
             return
         if self.session_state(session_id) != "ready":
             return
+        cleaned_ips = _clean_stored_addresses(info.ip_addresses)
+        if cleaned_ips != info.ip_addresses.strip():
+            self._store_ips(session_id, [part for part in cleaned_ips.split(", ") if part])
+            fresh = self.get_session(session_id)
+            if fresh is not None:
+                info = fresh
         if not info.ip_addresses.strip():
             command = self._begin_ip_probe(session_id, info.os_name)
         elif not info.username.strip():
@@ -1853,9 +1913,11 @@ class ApplicationService:
         self._ip_plan.pop(session_id, None)
 
     def _store_ips(self, session_id: domain.SessionId, addresses: list) -> None:
-        joined = ", ".join(addresses)
+        joined = ", ".join(part for part in addresses if part)
         info = self.get_session(session_id)
-        if info is None or not joined:
+        if info is None:
+            return
+        if not joined and not info.ip_addresses:
             return
         description = _description_without_ip(info.mcp_description)
         if info.ip_addresses == joined and info.mcp_description == description:
@@ -2395,30 +2457,99 @@ def _description_without_ip(text: str) -> str:
     return "\n".join(kept).strip()
 
 
-def _collect_addresses(raw: str) -> list:
-    """Все IPv4 и IPv6 из вывода ipconfig, ip addr или ifconfig."""
+_MAC = re.compile(r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b")
+_INET = re.compile(r"(?i)\binet6?(?:\s+addr)?[:\s]+([0-9A-Fa-f:.%]+)")
+_IPV4 = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
+_IPV6 = re.compile(
+    r"(?<![:0-9A-Fa-f.])((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![:0-9A-Fa-f])"
+)
+_HOST_LINE = re.compile(r"(?i)ipv[46]|ip[\s-]*(?:address|адрес)")
+_SKIP_LINE = re.compile(
+    r"(?i)(?:subnet\s*mask|netmask|маска|physical\s*address|физическ|"
+    r"default\s*gateway|основн\w*\s+шлюз|\bgateway\b|"
+    r"\bdns\b|\bdhcp\b|link/ether|\bether\b|\bhwaddr\b)"
+)
+
+
+def _is_prefix_mask(address: str) -> bool:
+    """255.255.255.0 и другие маски: единицы, затем нули."""
+    try:
+        value = int(ipaddress.IPv4Address(address))
+    except ValueError:
+        return False
+    if value in (0, 0xFFFFFFFF):
+        return True
+    return "01" not in f"{value:032b}"
+
+
+def _valid_address(token: str) -> str:
+    raw = token.strip().strip("[]").split("%", 1)[0].split("/", 1)[0]
+    if not raw or _MAC.fullmatch(raw):
+        return ""
+    try:
+        parsed = ipaddress.ip_address(raw)
+    except ValueError:
+        return ""
+    if parsed.is_unspecified:
+        return ""
+    if isinstance(parsed, ipaddress.IPv4Address):
+        if int(parsed) == 0xFFFFFFFF or _is_prefix_mask(str(parsed)):
+            return ""
+        return str(parsed)
+    return parsed.compressed
+
+
+def _clean_stored_addresses(text: str) -> str:
+    """Убрать из уже сохранённой строки маски и MAC, оставить адреса."""
     found = []
     seen = set()
-    for match in re.finditer(r"(?<!\d)(\d{1,3}(?:\.\d{1,3}){3})(?!\d)", raw):
-        address = match.group(1)
-        parts = address.split(".")
-        if any(not part.isdigit() or int(part) > 255 for part in parts):
-            continue
-        if address in {"0.0.0.0", "255.255.255.255"}:
-            continue
-        if address not in seen:
+    for token in re.split(r"[\s,;]+", text.strip()):
+        address = _valid_address(token)
+        if address and address not in seen:
             seen.add(address)
             found.append(address)
-    for match in re.finditer(
-        r"(?<![:0-9A-Fa-f])([0-9A-Fa-f:]{2,})(?![:0-9A-Fa-f])",
-        raw,
-    ):
-        address = match.group(1).split("%", 1)[0].split("/", 1)[0]
-        if address.count(":") < 2:
-            continue
-        if address not in seen:
+    return ", ".join(found)
+
+
+def _collect_addresses(raw: str) -> list:
+    """Адреса самой машины из ipconfig, ip addr, ifconfig или hostname -I.
+
+    Маски, MAC, шлюз и DNS не попадают в список. Широковещательный адрес
+    на строке inet тоже пропускается: берётся только адрес интерфейса.
+    """
+    text = _MAC.sub(" ", raw.replace("\r", ""))
+    found: list = []
+    seen = set()
+    labeled = False
+
+    def add(token: str) -> None:
+        address = _valid_address(token)
+        if address and address not in seen:
             seen.add(address)
             found.append(address)
+
+    for line in text.splitlines():
+        inet_hits = list(_INET.finditer(line))
+        if inet_hits:
+            labeled = True
+            for hit in inet_hits:
+                add(hit.group(1))
+            continue
+        if _SKIP_LINE.search(line):
+            labeled = True
+            continue
+        if _HOST_LINE.search(line):
+            labeled = True
+            for hit in _IPV4.finditer(line):
+                add(hit.group(1))
+            for hit in _IPV6.finditer(line):
+                add(hit.group(1))
+    if labeled:
+        return found
+    for hit in _IPV4.finditer(text):
+        add(hit.group(1))
+    for hit in _IPV6.finditer(text):
+        add(hit.group(1))
     return found
 
 

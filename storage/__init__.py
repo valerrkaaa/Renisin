@@ -3,12 +3,14 @@
 
 from storage.catalog import FileSessionCatalog
 from storage.command_allow import FileCommandAllowStore
+from storage.command_rules import FileCommandRuleStore
 from storage.journal import EncryptedJournalRepository
 from storage.llm_profiles import FileLlmProfileStore
 from storage.lounge import FileLoungeStore
 
 __all__ = [
     "FileCommandAllowStore",
+    "FileCommandRuleStore",
     "FileSessionCatalog",
     "EncryptedJournalRepository",
     "FileLlmProfileStore",

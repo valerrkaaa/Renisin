@@ -571,6 +571,13 @@ QFrame#shellBlock {
     border: 1px solid #2e2f36;
     border-radius: 12px;
 }
+QTextEdit#shellCodeRich {
+    background: transparent;
+    border: none;
+    padding: 0;
+    selection-background-color: #3f3a66;
+    selection-color: #ffffff;
+}
 QLabel#shellCode, QTextEdit#shellCode {
     color: #ececf1;
     background: transparent;

@@ -17,6 +17,7 @@ from mcp_host import TerminalMcpServer
 from storage import (
     EncryptedJournalRepository,
     FileCommandAllowStore,
+    FileCommandRuleStore,
     FileLlmProfileStore,
     FileLoungeStore,
     FileSessionCatalog,
@@ -126,6 +127,7 @@ def main() -> int:
     journal = EncryptedJournalRepository(journals_dir)
     llm_profiles = FileLlmProfileStore(os.path.join(data_dir, "llm_profiles.json"))
     command_allow = FileCommandAllowStore(os.path.join(data_dir, "mcp_allow.json"))
+    command_rules = FileCommandRuleStore(os.path.join(data_dir, "command_rules.json"))
 
     host_key_verifier = QtHostKeyVerifier()
     factory = DriverFactory(
@@ -140,6 +142,7 @@ def main() -> int:
         llm_profiles=llm_profiles,
         llm_client=RoutingLlmClient(),
         command_allow=command_allow,
+        command_rules=command_rules,
         lounge_store=FileLoungeStore(os.path.join(data_dir, "lounge.json")),
     )
     try:

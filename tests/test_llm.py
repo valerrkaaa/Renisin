@@ -18,7 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import domain
-from application.service import ApplicationService, LlmUnavailable, _clean_os_output, _collect_addresses
+from application.service import (
+    ApplicationService,
+    LlmUnavailable,
+    _clean_os_output,
+    _clean_stored_addresses,
+    _collect_addresses,
+)
 from drivers.llm import LmStudioClient
 from drivers.llm_factory import RoutingLlmClient
 from storage.catalog import FileSessionCatalog
@@ -520,6 +526,42 @@ class OsPromptTests(unittest.TestCase):
                 "999.1.1.1\n"
             ),
             ["192.168.1.20", "10.0.0.5", "2001:db8::20"],
+        )
+        self.assertEqual(
+            _collect_addresses(
+                "Physical Address. . . . . . . . . : 00-1A-2B-3C-4D-5E\n"
+                "IPv4 Address. . . . . . . . . . . : 192.168.1.20\n"
+                "Subnet Mask . . . . . . . . . . . : 255.255.255.0\n"
+                "Default Gateway . . . . . . . . . : 192.168.1.1\n"
+                "DNS Servers . . . . . . . . . . . : 8.8.8.8\n"
+            ),
+            ["192.168.1.20"],
+        )
+        self.assertEqual(
+            _collect_addresses(
+                "link/ether b8:27:eb:1a:2b:3c brd ff:ff:ff:ff:ff:ff\n"
+                "inet 192.168.1.20/24 brd 192.168.1.255 scope global eth0\n"
+                "inet6 fe80::ba27:ebff:fe1a:2b3c/64 scope link\n"
+                "inet 127.0.0.1/8 scope host lo\n"
+            ),
+            ["192.168.1.20", "fe80::ba27:ebff:fe1a:2b3c", "127.0.0.1"],
+        )
+        self.assertEqual(
+            _collect_addresses(
+                "inet 10.0.0.5 netmask 255.255.255.0 broadcast 10.0.0.255\n"
+                "ether b8:27:eb:1a:2b:3c\n"
+            ),
+            ["10.0.0.5"],
+        )
+        self.assertEqual(
+            _collect_addresses("192.168.1.20 2001:db8::20\n"),
+            ["192.168.1.20", "2001:db8::20"],
+        )
+        self.assertEqual(
+            _clean_stored_addresses(
+                "192.168.1.20, 255.255.255.0, b8:27:eb:1a:2b:3c, 10.0.0.5"
+            ),
+            "192.168.1.20, 10.0.0.5",
         )
 
     def test_new_chat_asks_once_and_old_chat_stays_empty(self) -> None:

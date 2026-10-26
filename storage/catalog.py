@@ -121,6 +121,7 @@ class FileSessionCatalog:
             d["ip_addresses"] = info.ip_addresses
         if info.username:
             d["username"] = info.username
+        d["shell_family"] = domain.normalize_shell_family(info.shell_family)
         return d
 
     @classmethod
@@ -142,6 +143,7 @@ class FileSessionCatalog:
             os_name=str(d.get("os_name") or ""),
             ip_addresses=str(d.get("ip_addresses") or ""),
             username=str(d.get("username") or ""),
+            shell_family=domain.normalize_shell_family(str(d.get("shell_family") or "")),
         )
 
     # --- SessionCatalog ---------------------------------------------------
