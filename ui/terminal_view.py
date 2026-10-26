@@ -139,6 +139,9 @@ class TerminalView(QWidget):
     def is_fullscreen(self) -> bool:
         return self._full_screen or self._screen.in_alternate_screen
 
+    def plain_text(self) -> str:
+        return self._screen.primary_text()
+
     def has_content(self) -> bool:
         rows, _cursor, _alt = self._screen.paint_rows()
         return any(_line_has_text(line) for line in rows)

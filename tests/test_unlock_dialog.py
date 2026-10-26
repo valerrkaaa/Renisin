@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import unittest
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QPushButton
 
 import domain
-from ui.dialogs import UnlockSessionDialog
+from ui.dialogs import UnlockSessionDialog, _ChainPasswordRow
 
 
 class UnlockDialogTests(unittest.TestCase):
@@ -69,4 +71,46 @@ class UnlockDialogTests(unittest.TestCase):
         for _ in range(5):
             QApplication.processEvents()
         self.assertIs(dialog.focusWidget(), dialog.ssh_secret)
+        dialog.close()
+
+    def test_reconnect_chain_is_one_row_per_hop(self) -> None:
+        info = domain.SessionInfo(
+            session_id="s-chain",
+            name="цепочка",
+            provider=domain.ProviderType.SSH_OVER_SSH,
+            identity=domain.ExecutionIdentityType.CURRENT_USER,
+            status=domain.SessionStatus.CLOSED,
+            ssh=domain.SSHConfig(
+                host="10.0.0.1",
+                username="root",
+                hops=(domain.SSHHop(host="10.0.0.2", username="ubuntu", port=2200),),
+            ),
+        )
+        dialog = UnlockSessionDialog(object(), info, reconnect=True)  # type: ignore[arg-type]
+        dialog.show()
+        for _ in range(5):
+            QApplication.processEvents()
+        self.assertEqual(len(dialog._chain_rows), 2)
+        self.assertTrue(all(isinstance(row, _ChainPasswordRow) for row in dialog._chain_rows))
+        self.assertEqual(dialog._chain_rows[0].endpoint.text(), "root@10.0.0.1")
+        self.assertEqual(dialog._chain_rows[1].endpoint.text(), "ubuntu@10.0.0.2:2200")
+        self.assertEqual(dialog.findChildren(QPushButton, "auxButton"), [])
+        self.assertFalse(dialog._kept_in_tab_order(dialog.password_edit))
+        self.assertIs(dialog.focusWidget(), dialog._chain_rows[0].password)
+        QTest.keyClick(dialog.focusWidget(), Qt.Key.Key_Tab)
+        self.assertIs(dialog.focusWidget(), dialog._chain_rows[1].password)
+        QTest.keyClick(dialog.focusWidget(), Qt.Key.Key_Tab)
+        self.assertIs(dialog.focusWidget(), dialog._ok_button)
+        dialog._chain_rows[0].password.setText("one")
+        dialog._chain_rows[1].password.setText("two")
+        built = dialog._unlock_chain()
+        self.assertIsNotNone(built)
+        config, secret, hops = built
+        self.assertEqual(secret, "one")
+        self.assertEqual(hops, ("two",))
+        self.assertEqual(config.host, "10.0.0.1")
+        self.assertEqual(config.username, "root")
+        self.assertEqual(config.hops[0].host, "10.0.0.2")
+        self.assertEqual(config.hops[0].username, "ubuntu")
+        self.assertEqual(config.hops[0].port, 2200)
         dialog.close()

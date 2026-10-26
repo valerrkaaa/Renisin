@@ -342,6 +342,33 @@ class PromptTests(unittest.TestCase):
         )
         self.assertEqual(service._lounge_model_history(tab.tab_id), [])
 
+    def test_lounge_command_record_survives_reload(self) -> None:
+        from storage.lounge import FileLoungeStore
+
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "lounge.json")
+        service = ApplicationService(
+            lambda _provider: _Driver(),
+            _Catalog(),
+            _Journal(),
+            lounge_store=FileLoungeStore(path),
+        )
+        tab = service.list_lounge_tabs()[0]
+        payload = json.dumps(
+            {"mcp": "консоль", "command": "ls", "output": "a.txt", "code": 0},
+            ensure_ascii=False,
+        )
+        service.remember_lounge_command(tab.tab_id, payload)
+        service.record_tool_outcome("s", "выполнено: ls\nMCP: консоль", tab.tab_id)
+        self.assertEqual(service._lounge_model_history(tab.tab_id), [])
+        loaded = FileLoungeStore(path).load()
+        self.assertEqual(
+            [role for role, _text in loaded[0].messages],
+            ["command", "result"],
+        )
+        self.assertIn("консоль", loaded[0].messages[0][1])
+        self.assertIn("a.txt", loaded[0].messages[0][1])
+
     def test_unparsed_tool_call_stays_broken(self) -> None:
         from drivers.llm import _read_message
 
@@ -1076,7 +1103,9 @@ class ChatCardTests(unittest.TestCase):
         self.assertTrue(clicked)
         self.assertEqual(box.get("result"), refusal())
         self.assertNotIn("ls", driver.sent)
-        self.assertIn("отклонено\nls", notes)
+        self.assertTrue(
+            any(note.startswith("отклонено\nls") and "MCP: пульт" in note for note in notes)
+        )
 
     def test_lounge_command_accepts_a_password(self) -> None:
         from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton

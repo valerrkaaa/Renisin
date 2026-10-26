@@ -35,7 +35,7 @@ class FileLoungeStore:
                 if not isinstance(message, dict):
                     continue
                 role = str(message.get("role") or "")
-                if role not in ("user", "assistant"):
+                if role not in ("user", "assistant", "result", "command"):
                     continue
                 messages.append((role, str(message.get("text") or "")))
             tabs.append(

@@ -584,7 +584,7 @@ QFrame#commandRequest {
     border: 1px solid #3f3a66;
     border-radius: 12px;
 }
-QLabel#commandIntent {
+QLabel#commandIntent, QLabel#commandTarget {
     color: #e4e4e7;
 }
 QLineEdit#commandReason {

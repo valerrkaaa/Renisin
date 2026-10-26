@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from uuid import uuid4
@@ -335,12 +336,14 @@ class GeneralChatPage(QWidget):
             self._model_combo.setVisible(True)
             self._fill_model_combo()
 
-    def open_command_card(self, tab_id: str, command: str) -> Optional[CommandCard]:
+    def open_command_card(
+        self, tab_id: str, command: str, mcp: str = ""
+    ) -> Optional[CommandCard]:
         """Блок команды в ленте, как в личном чате. Пока он живой, в него можно вводить текст."""
         tab = self._find_tab(tab_id)
         if tab is None:
             return None
-        card = CommandCard(command, self._mono)
+        card = CommandCard(command, self._mono, target=mcp)
         card.resend_button.hide()
         card.delete_button.hide()
         card.attach_button.hide()
@@ -389,10 +392,11 @@ class GeneralChatPage(QWidget):
         return_code: Optional[int],
         stdout: QTextCharFormat,
         exit_fmt: QTextCharFormat,
-    ) -> None:
+    ) -> str:
+        """Завершает живую карточку и возвращает запись для журнала вкладки."""
         card = self._live_card(tab_id)
         if card is None:
-            return
+            return ""
         if card.is_live():
             plain = card.take_plain()
             kept = card.end_live()
@@ -401,8 +405,10 @@ class GeneralChatPage(QWidget):
             elif plain:
                 card.append_output(plain, stdout)
         card.finalize(return_code, exit_fmt)
+        card.record = _command_record(card)
         if self.current_tab_id() == tab_id:
             self._render_messages()
+        return card.record
 
     def _live_card(self, tab_id: str) -> Optional[CommandCard]:
         tab = self._find_tab(tab_id)
@@ -415,15 +421,18 @@ class GeneralChatPage(QWidget):
 
     def _render_messages(self) -> None:
         tab = self._tabs[self._current]
-        kept = {card for _index, card in tab.cards}
+        self._drop_dead_cards(tab)
+        current = {card for _index, card in tab.cards}
+        owned = {card for item in self._tabs for _index, card in item.cards}
         while self._transcript.count() > 1:
             item = self._transcript.takeAt(0)
             widget = item.widget()
-            if widget is None or widget in kept:
+            if widget is None or widget in current:
                 continue
             widget.hide()
             widget.setParent(None)
-            widget.deleteLater()
+            if widget not in owned:
+                widget.deleteLater()
         self._request_card = None
         if (
             not tab.messages
@@ -441,13 +450,32 @@ class GeneralChatPage(QWidget):
 
         def place_cards(index: int) -> None:
             for card in grouped.get(index, []):
+                card.show()
                 self._transcript.insertWidget(self._transcript.count() - 1, card)
+
+        saved = [
+            card.record
+            for _index, card in tab.cards
+            if getattr(card, "record", "")
+        ]
+
+        def already_shown(text: str) -> bool:
+            if text not in saved:
+                return False
+            saved.remove(text)
+            return True
 
         place_cards(0)
         for number, (role, text) in enumerate(tab.messages, start=1):
-            self._transcript.insertWidget(
-                self._transcript.count() - 1, self._bubble(role, text)
+            if role == "command" and already_shown(text):
+                place_cards(number)
+                continue
+            bubble = (
+                self._stored_command(text)
+                if role == "command"
+                else self._bubble(role, text)
             )
+            self._transcript.insertWidget(self._transcript.count() - 1, bubble)
             place_cards(number)
         self._thinking_label = None
         waiting = tab.request is not None
@@ -482,6 +510,38 @@ class GeneralChatPage(QWidget):
                 QTimer.singleShot(0, lambda: go(False))
 
         QTimer.singleShot(0, go)
+
+    def _drop_dead_cards(self, tab: _Tab) -> None:
+        alive = []
+        for index, card in tab.cards:
+            try:
+                card.isVisible()
+            except RuntimeError:
+                continue
+            alive.append((index, card))
+        tab.cards = alive
+
+    def _stored_command(self, text: str) -> QWidget:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):
+            return self._bubble("result", text)
+        card = CommandCard(
+            str(data.get("command") or ""),
+            self._mono,
+            target=str(data.get("mcp") or ""),
+        )
+        card.resend_button.hide()
+        card.delete_button.hide()
+        card.attach_button.hide()
+        output = str(data.get("output") or "")
+        if output:
+            fmt = QTextCharFormat()
+            fmt.setFont(self._mono)
+            card.append_output(output, fmt)
+        return card
 
     def _bubble(self, role: str, text: str) -> QWidget:
         if role == "result":
@@ -743,3 +803,14 @@ class GeneralChatPage(QWidget):
     def _style(self, widget: QWidget) -> None:
         widget.style().unpolish(widget)
         widget.style().polish(widget)
+
+
+def _command_record(card: CommandCard) -> str:
+    payload = {
+        "mcp": card.target,
+        "command": card.command,
+        "output": card.output_text(),
+    }
+    if card.return_code is not None:
+        payload["code"] = card.return_code
+    return json.dumps(payload, ensure_ascii=False)

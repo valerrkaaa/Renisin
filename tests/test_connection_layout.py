@@ -163,3 +163,31 @@ class TreeUiTests(unittest.TestCase):
             info.session_id,
         )
         window.close()
+
+    def test_delete_button_returns_the_name_width(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        from ui.main_window import _SessionRow
+
+        row = _SessionRow(
+            "s",
+            "длинное имя подключения в списке сессий",
+            active=False,
+            muted=False,
+        )
+        row.setFixedWidth(320)
+        row.show()
+        QApplication.processEvents()
+        row._set_delete_visible(False)
+        QApplication.processEvents()
+        full = row._label.width()
+        row._set_delete_visible(True)
+        QApplication.processEvents()
+        self.assertLess(row._label.width(), full)
+        self.assertTrue(row._delete.isVisible())
+        row._set_delete_visible(False)
+        QApplication.processEvents()
+        self.assertFalse(row._delete.isVisible())
+        self.assertGreaterEqual(row._label.width(), full - 2)
+        self.assertLess(row.layout().indexOf(row._delete), 0)
+        row.close()

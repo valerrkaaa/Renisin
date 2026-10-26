@@ -13,10 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import json
+
 import domain
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextCharFormat
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QTextEdit
 
+from ui.command_card import CommandCard
 from ui.general_chat import GENERAL_CHAT_ID, GENERAL_CHAT_TITLE, GeneralChatPage
 from ui.main_window import MainWindow
 
@@ -172,6 +176,56 @@ class GeneralChatTests(unittest.TestCase):
         draft.insertPlainText("раз\nдва\nтри\nчетыре")
         QApplication.processEvents()
         self.assertGreater(draft.height(), one_line)
+        page.close()
+
+    def test_command_history_stays_when_the_tab_changes(self) -> None:
+        page = GeneralChatPage()
+        page.show()
+        QApplication.processEvents()
+        first = page.current_tab_id()
+        card = page.open_command_card(first, "ls", "консоль")
+        self.assertIsNotNone(card)
+        fmt = QTextCharFormat()
+        card.append_output("a.txt\n", fmt)
+        page.finish_command_card(first, 0, fmt, fmt)
+        page.append_message(first, "command", card.record)
+        page._add_tab()
+        QApplication.processEvents()
+        page._select_tab(0)
+        QApplication.processEvents()
+        shown = [item for item in page.findChildren(CommandCard) if item.isVisible()]
+        self.assertEqual(len(shown), 1)
+        self.assertIn("ls", shown[0].command)
+        self.assertIn("a.txt", shown[0].output_text())
+        self.assertEqual(shown[0].findChild(QLabel, "commandTarget").text(), "MCP: консоль")
+        self.assertIn("консоль", card.record)
+        page.close()
+
+    def test_saved_command_renders_without_a_live_card(self) -> None:
+        page = GeneralChatPage()
+        page.show()
+        QApplication.processEvents()
+        payload = json.dumps(
+            {"mcp": "консоль", "command": "ls", "output": "a.txt", "code": 0},
+            ensure_ascii=False,
+        )
+        page.set_messages(
+            page.current_tab_id(),
+            [("user", "покажи"), ("command", payload), ("result", "выполнено: ls\nMCP: консоль")],
+        )
+        QApplication.processEvents()
+        shown = [item for item in page.findChildren(CommandCard) if not item.isHidden()]
+        self.assertEqual(len(shown), 1)
+        self.assertIn("a.txt", shown[0].output_text())
+        self.assertEqual(shown[0].findChild(QLabel, "commandTarget").text(), "MCP: консоль")
+        notes = [label.text() for label in page.findChildren(QLabel, "toolOutcome")]
+        self.assertIn("MCP: консоль", notes[0])
+        page._add_tab()
+        page._select_tab(0)
+        QApplication.processEvents()
+        again = [item for item in page.findChildren(CommandCard) if not item.isHidden()]
+        self.assertEqual(len(again), 1)
+        self.assertIn("a.txt", again[0].output_text())
         page.close()
 
     def test_window_opens_general_chat_and_lists_live_mcp(self) -> None:

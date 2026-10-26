@@ -82,6 +82,48 @@ class _HopFields(QWidget):
     def clear_secret(self) -> None:
         self.password.clear()
 
+    def values(self) -> tuple[str, str, str]:
+        return self.host.text().strip(), self.user.text().strip(), self.password.text()
+
+
+class _ChainPasswordRow(QWidget):
+    """Строка повторного входа: логин@адрес и поле пароля."""
+
+    def __init__(
+        self,
+        username: str,
+        host: str,
+        port: int = 22,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._host = host.strip()
+        self._user = username.strip()
+        self._port = port
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        shown = f"{self._user}@{self._host}"
+        if port and port != 22:
+            shown = f"{shown}:{port}"
+        self.endpoint = QLabel(shown)
+        self.endpoint.setObjectName("chainEndpoint")
+        self.endpoint.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.endpoint)
+        self.password = QLineEdit()
+        self.password.setObjectName("chainPassword")
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("Пароль")
+        layout.addWidget(self.password, 1)
+
+    def values(self) -> tuple[str, str, str]:
+        return self._host, self._user, self.password.text()
+
+    def clear_secret(self) -> None:
+        self.password.clear()
+
 
 @dataclass
 class NewSessionRequest:
@@ -652,7 +694,10 @@ class UnlockSessionDialog(_SessionCallDialog):
             domain.ProviderType.SSH,
             domain.ProviderType.SSH_OVER_SSH,
         )
-        self._fit_to_screen(560, 680 if tall else 280)
+        if reconnect and session_info.provider == domain.ProviderType.SSH_OVER_SSH:
+            self._fit_to_screen(520, 360)
+        else:
+            self._fit_to_screen(560, 680 if tall else 280)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 14)
@@ -769,24 +814,30 @@ class UnlockSessionDialog(_SessionCallDialog):
             self._chain_layout = QVBoxLayout(self._chain_host)
             self._chain_layout.setContentsMargins(0, 0, 0, 0)
             self._chain_layout.setSpacing(8)
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            scroll.setWidget(self._chain_host)
-            scroll.setMinimumHeight(120)
-            scroll.setMaximumHeight(280)
-            chain_layout.addWidget(scroll)
-            self._add_chain_hop = QPushButton("+")
-            self._add_chain_hop.setObjectName("auxButton")
-            self._add_chain_hop.setAutoDefault(False)
-            self._add_chain_hop.setDefault(False)
-            self._add_chain_hop.setToolTip("Добавить следующий узел цепочки")
-            self._add_chain_hop.clicked.connect(self._add_unlock_hop)
-            chain_layout.addWidget(self._add_chain_hop, 0, Qt.AlignmentFlag.AlignLeft)
+            if reconnect:
+                chain_layout.addWidget(self._chain_host)
+                self._add_password_row(ssh.username, ssh.host, ssh.port)
+                for hop in ssh.hops:
+                    self._add_password_row(hop.username, hop.host, hop.port)
+            else:
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                scroll.setWidget(self._chain_host)
+                scroll.setMinimumHeight(120)
+                scroll.setMaximumHeight(280)
+                chain_layout.addWidget(scroll)
+                self._add_chain_hop = QPushButton("+")
+                self._add_chain_hop.setObjectName("auxButton")
+                self._add_chain_hop.setAutoDefault(False)
+                self._add_chain_hop.setDefault(False)
+                self._add_chain_hop.setToolTip("Добавить следующий узел цепочки")
+                self._add_chain_hop.clicked.connect(self._add_unlock_hop)
+                chain_layout.addWidget(self._add_chain_hop, 0, Qt.AlignmentFlag.AlignLeft)
+                self._add_unlock_hop(ssh.host, ssh.username)
+                for hop in ssh.hops:
+                    self._add_unlock_hop(hop.host, hop.username)
             layout.addWidget(self._chain_container)
-            self._add_unlock_hop(ssh.host, ssh.username)
-            for hop in ssh.hops:
-                self._add_unlock_hop(hop.host, hop.username)
 
         layout.addLayout(form)
         if self.ssh_auth is not None:
@@ -823,6 +874,7 @@ class UnlockSessionDialog(_SessionCallDialog):
         self._buttons.accepted.connect(self._on_ok)
         self._buttons.rejected.connect(self.reject)
         root.addWidget(self._buttons)
+        self._apply_tab_order()
 
     # --- публичное --------------------------------------------------------
 
@@ -855,6 +907,8 @@ class UnlockSessionDialog(_SessionCallDialog):
             key_label = self._ssh_form.labelForField(self.ssh_key_path)
             if key_label is not None:
                 key_label.setVisible(is_key)
+        if getattr(self, "_ok_button", None) is not None:
+            self._apply_tab_order()
 
     def _set_error(self, message: str) -> None:
         self._error_label.setText(message)
@@ -1019,6 +1073,49 @@ class UnlockSessionDialog(_SessionCallDialog):
             )
         )
 
+    def _kept_in_tab_order(self, widget: QWidget) -> bool:
+        """isVisible() до show() всегда ложен. Смотрим локальный флаг и родителей."""
+        current: Optional[QWidget] = widget
+        while current is not None and current is not self:
+            if current.isHidden():
+                return False
+            current = current.parentWidget()
+        return True
+
+    def _apply_tab_order(self) -> None:
+        """Tab идёт по полям сверху вниз. Скрытый пароль журнала пропускается."""
+        widgets: list[QWidget] = []
+        for row in self._chain_rows:
+            if isinstance(row, _ChainPasswordRow):
+                widgets.append(row.password)
+            elif isinstance(row, _HopFields):
+                widgets.extend([row.host, row.user, row.password])
+                if self._kept_in_tab_order(row.remove_button):
+                    widgets.append(row.remove_button)
+        for field in (self.ssh_user, self.ssh_auth, self.ssh_secret, self.ssh_key_path):
+            if field is not None and self._kept_in_tab_order(field):
+                widgets.append(field)
+        add_hop = getattr(self, "_add_chain_hop", None)
+        if add_hop is not None and self._kept_in_tab_order(add_hop):
+            widgets.append(add_hop)
+        if self._kept_in_tab_order(self.password_edit):
+            self.password_edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            widgets.append(self.password_edit)
+        else:
+            self.password_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if self._ok_button is not None:
+            widgets.append(self._ok_button)
+        if self._cancel_button is not None:
+            widgets.append(self._cancel_button)
+        for earlier, later in zip(widgets, widgets[1:]):
+            self.setTabOrder(earlier, later)
+
+    def _add_password_row(self, username: str, host: str, port: int = 22) -> None:
+        row = _ChainPasswordRow(username, host, port)
+        row.password.returnPressed.connect(self._on_ok)
+        self._chain_layout.addWidget(row)
+        self._chain_rows.append(row)
+
     def _add_unlock_hop(self, host: str = "", username: str = "") -> None:
         row = _HopFields(removable=True)
         row.host.setText(host)
@@ -1053,9 +1150,7 @@ class UnlockSessionDialog(_SessionCallDialog):
         first_user = ""
         first_secret = ""
         for index, row in enumerate(self._chain_rows, start=1):
-            host = row.host.text().strip()
-            user = row.user.text().strip()
-            secret = row.password.text()
+            host, user, secret = row.values()
             if not host:
                 self._set_error(f"Укажите IP узла {index}")
                 return None
@@ -1065,16 +1160,23 @@ class UnlockSessionDialog(_SessionCallDialog):
             if not secret:
                 self._set_error(f"Введите пароль узла {index}")
                 return None
-            if index == 1:
-                first_host, first_user, first_secret = host, user, secret
+            if hasattr(row, "_port"):
+                port = row._port
+            elif index == 1 and self._session_info.ssh is not None:
+                port = self._session_info.ssh.port
             else:
-                hops.append(domain.SSHHop(host=host, username=user))
+                port = 22
+            if index == 1:
+                first_host, first_user, first_secret, first_port = host, user, secret, port
+            else:
+                hops.append(domain.SSHHop(host=host, username=user, port=port))
                 secrets.append(secret)
         timeout = 15.0
         if self._session_info.ssh is not None:
             timeout = self._session_info.ssh.connect_timeout
         config = domain.SSHConfig(
             host=first_host,
+            port=first_port,
             username=first_user,
             auth_method=domain.SSHAuthMethod.PASSWORD,
             connect_timeout=timeout,

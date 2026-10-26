@@ -223,6 +223,7 @@ class _SessionRow(QWidget):
         self._delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self._delete.clicked.connect(lambda: self.delete_clicked.emit(session_id))
         self._delete.setVisible(False)
+        self._delete.setMaximumWidth(0)
         self._deletable = deletable
         self._fold = None
         if kind == "group":
@@ -234,24 +235,38 @@ class _SessionRow(QWidget):
             self._fold.clicked.connect(lambda: self.toggle_requested.emit(session_id))
             layout.addWidget(self._fold)
         layout.addWidget(self._label, 1)
-        if deletable:
-            layout.addWidget(self._delete)
 
     def enterEvent(self, event) -> None:  # type: ignore[override]
-        if self._deletable:
-            self._delete.setVisible(True)
+        self._set_delete_visible(True)
         self._set_hover(True)
-        self._elide()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
         # Переход на кнопку-ребёнка тоже шлёт leave. Прячем кнопку,
         # только когда курсор действительно вышел из строки.
         if not self.rect().contains(self.mapFromGlobal(QCursor.pos())):
-            self._delete.setVisible(False)
+            self._set_delete_visible(False)
             self._set_hover(False)
-            self._elide()
         super().leaveEvent(event)
+
+    def _set_delete_visible(self, visible: bool) -> None:
+        layout = self.layout()
+        if layout is None or not self._deletable:
+            return
+        if visible:
+            self._delete.setMaximumWidth(16777215)
+            if layout.indexOf(self._delete) < 0:
+                layout.addWidget(self._delete)
+            self._delete.show()
+        else:
+            layout.removeWidget(self._delete)
+            self._delete.hide()
+            self._delete.setMaximumWidth(0)
+        layout.invalidate()
+        layout.activate()
+        self._label.setText(self._full)
+        self._elide()
+        QTimer.singleShot(0, self._elide)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         self._press = event.position().toPoint()
@@ -310,7 +325,10 @@ class _SessionRow(QWidget):
         self.style().polish(self)
 
     def _elide(self) -> None:
-        width = self._label.width()
+        try:
+            width = self._label.width()
+        except RuntimeError:
+            return
         if width < 24:
             self._label.setText(self._full)
             return
@@ -1991,7 +2009,11 @@ class MainWindow(QMainWindow):
             return
         kind = event.event_type
         if kind == domain.EventType.COMMAND_SENT:
-            card = self._lounge.open_command_card(tab_id, event.payload.rstrip("\n"))
+            card = self._lounge.open_command_card(
+                tab_id,
+                event.payload.rstrip("\n"),
+                self._mcp_label(event.session_id),
+            )
             if card is None:
                 return
             session_id = event.session_id
@@ -2036,12 +2058,7 @@ class MainWindow(QMainWindow):
             )
             return
         if kind == domain.EventType.COMMAND_FINISHED:
-            self._lounge.finish_command_card(
-                tab_id,
-                event.return_code,
-                self._formats.stdout,
-                self._formats.exit,
-            )
+            self._finish_lounge_card(tab_id, event.return_code)
             self._lounge_runs.pop(event.session_id, None)
 
     @Slot(object)
@@ -2056,6 +2073,8 @@ class MainWindow(QMainWindow):
                 self._lounge.append_message(lounge_tab, "assistant", event.payload)
             elif event.event_type == domain.EventType.CHAT_TOOL:
                 self._lounge.append_message(lounge_tab, "result", event.payload)
+            elif event.event_type == domain.EventType.CHAT_COMMAND:
+                self._lounge.append_message(lounge_tab, "command", event.payload)
             return
         self._mirror_lounge_command(event)
         if event.event_type in (
@@ -2397,9 +2416,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         if tab:
-            self._lounge.finish_command_card(
-                tab, None, self._formats.stdout, self._formats.exit
-            )
+            self._finish_lounge_card(tab, None)
             self._lounge_runs.pop(session_id, None)
 
     def _record_tool_outcome(self, prompt: CommandAsk, action: str, reason: str) -> None:
@@ -2414,8 +2431,41 @@ class MainWindow(QMainWindow):
         if not callable(note):
             return
         tab = lounge_tab_id(prompt.origin_id)
+        if tab:
+            label = self._mcp_label(prompt.session_id)
+            if label:
+                text = f"{text}\nMCP: {label}"
         try:
             note(prompt.session_id, text, tab)
+        except Exception:
+            return
+
+    def _mcp_label(self, session_id: str) -> str:
+        getter = getattr(self._service, "get_session", None)
+        if not callable(getter):
+            return ""
+        try:
+            info = getter(session_id)
+        except Exception:
+            return ""
+        if info is None:
+            return ""
+        return (getattr(info, "mcp_alias", "") or "").strip() or getattr(info, "name", "")
+
+    def _finish_lounge_card(self, tab_id: str, return_code: Optional[int]) -> None:
+        record = self._lounge.finish_command_card(
+            tab_id,
+            return_code,
+            self._formats.stdout,
+            self._formats.exit,
+        )
+        if not record:
+            return
+        remember = getattr(self._service, "remember_lounge_command", None)
+        if not callable(remember):
+            return
+        try:
+            remember(tab_id, record)
         except Exception:
             return
 

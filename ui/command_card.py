@@ -40,9 +40,13 @@ class CommandCard(QFrame):
         command: str,
         mono: QFont,
         parent: Optional[QWidget] = None,
+        target: str = "",
     ) -> None:
         super().__init__(parent)
         self.command = command
+        self.target = target
+        self.record = ""
+        self.return_code: Optional[int] = None
         self._finalized = False
         self._has_output = False
         self._height_scheduled = False
@@ -63,6 +67,11 @@ class CommandCard(QFrame):
         icon.setObjectName("commandIcon")
         icon.setFont(mono)
         header.addWidget(icon)
+
+        if target:
+            where = QLabel(f"MCP: {target}")
+            where.setObjectName("commandTarget")
+            header.addWidget(where, 0, Qt.AlignmentFlag.AlignTop)
 
         self.command_label = QLabel(command)
         self.command_label.setObjectName("commandText")
@@ -251,6 +260,7 @@ class CommandCard(QFrame):
         if self._finalized:
             return
         self._finalized = True
+        self.return_code = return_code
 
         if return_code is None:
             self._append_exit_line("[завершено без кода возврата]", exit_fmt)
@@ -320,9 +330,17 @@ class CommandCard(QFrame):
         self.attach_button.setVisible(visible)
 
     def output_text(self) -> str:
-        if self.terminal.isVisible() and self._plain:
-            return self._plain
-        return self.output.toPlainText()
+        editor = self.output.toPlainText()
+        if not self.terminal.isVisible():
+            return editor
+        screen = self._plain if self._plain else self.terminal.plain_text()
+        body = (screen or "").strip("\n")
+        if not body:
+            return editor
+        extra = editor.strip("\n")
+        if extra and extra not in body:
+            return body + "\n" + extra
+        return screen or body
 
     def attachment_text(self) -> str:
         output = self.output_text().rstrip()

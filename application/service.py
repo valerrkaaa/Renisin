@@ -2024,6 +2024,13 @@ class ApplicationService:
         tab = self._lounge_tab(tab_id)
         return list(tab.messages)
 
+    def remember_lounge_command(self, tab_id: str, text: str) -> None:
+        """Карточка вызова в ленте вкладки: команда, вывод и MCP. Модели не уходит."""
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        self._remember_lounge(tab_id, "command", cleaned)
+
     def record_tool_outcome(
         self, session_id: domain.SessionId, text: str, lounge_tab: str = ""
     ) -> None:
@@ -2206,6 +2213,8 @@ class ApplicationService:
             kind = domain.EventType.CHAT_USER
         elif role == "result":
             kind = domain.EventType.CHAT_TOOL
+        elif role == "command":
+            kind = domain.EventType.CHAT_COMMAND
         else:
             kind = domain.EventType.CHAT_ASSISTANT
         event = domain.TranscriptEvent(
@@ -2240,7 +2249,7 @@ class ApplicationService:
         """Переписка для модели: цитата MCP раскрывается в имя, описание и ОС."""
         history = []
         for role, text in self._lounge_tab(tab_id).messages:
-            if role == "result":
+            if role in ("result", "command"):
                 continue
             if role == "user":
                 history.append((role, self._expand_mcp_cite(text)))
