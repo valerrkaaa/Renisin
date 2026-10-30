@@ -1980,10 +1980,27 @@ class ApplicationService:
                 raise ValueError(f"Укажите адрес узла {index}")
             if not hop.username.strip():
                 raise ValueError(f"Укажите логин узла {index}")
-        if not auth_secret:
-            raise ValueError("Введите пароль первого узла")
-        if len(hop_secrets) != len(ssh.hops) or any(not item for item in hop_secrets):
-            raise ValueError("Введите пароль каждого следующего узла")
+        self._require_ssh_secret(1, ssh.auth_method, auth_secret, ssh.private_key_path)
+        if len(hop_secrets) != len(ssh.hops):
+            raise ValueError("Не хватает данных входа для узла цепочки")
+        for index, (hop, secret) in enumerate(zip(ssh.hops, hop_secrets), start=2):
+            self._require_ssh_secret(index, hop.auth_method, secret, hop.private_key_path)
+
+    @staticmethod
+    def _require_ssh_secret(
+        index: int,
+        method: domain.SSHAuthMethod,
+        secret: Optional[str],
+        key_path: Optional[str],
+    ) -> None:
+        if method == domain.SSHAuthMethod.PRIVATE_KEY:
+            if not (key_path or "").strip():
+                raise ValueError(f"Укажите файл ключа узла {index}")
+            return
+        if method == domain.SSHAuthMethod.AGENT:
+            return
+        if not secret:
+            raise ValueError(f"Введите пароль узла {index}")
 
     def _journal_os(self, session_id: domain.SessionId) -> str:
         if not self._journal.is_unlocked(session_id):

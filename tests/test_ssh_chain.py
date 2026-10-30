@@ -4,6 +4,7 @@
 """Цепочка SSH: каталог без паролей, проверка узлов и кнопка «+»."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -90,6 +91,20 @@ class ChainRulesTests(unittest.TestCase):
             domain.ssh_location(_chain()),
             "jump@10.0.0.1:22 → app@10.0.0.2:22",
         )
+        keyed = domain.SSHConfig(
+            host="10.0.0.1",
+            username="jump",
+            auth_method=domain.SSHAuthMethod.AGENT,
+            hops=(domain.SSHHop(
+                host="10.0.0.2",
+                username="app",
+                auth_method=domain.SSHAuthMethod.PRIVATE_KEY,
+                private_key_path="C:/keys/app",
+            ),),
+        )
+        second = domain.ssh_targets(keyed)[1]
+        self.assertEqual(second.auth_method, domain.SSHAuthMethod.PRIVATE_KEY)
+        self.assertEqual(second.private_key_path, "C:/keys/app")
 
     def test_catalog_stores_hops_without_passwords(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -113,6 +128,35 @@ class ChainRulesTests(unittest.TestCase):
             with open(os.path.join(folder, "sessions.json"), encoding="utf-8") as handle:
                 raw = handle.read()
             self.assertNotIn("secret", raw)
+            self.assertEqual(loaded.ssh.hops[0].auth_method, domain.SSHAuthMethod.PASSWORD)
+
+            old_path = os.path.join(folder, "old.json")
+            old = {
+                "sessions": {
+                    "s-old": {
+                        "session_id": "s-old",
+                        "name": "старая",
+                        "provider": "ssh_over_ssh",
+                        "identity": "current_user",
+                        "status": "closed",
+                        "ssh": {
+                            "host": "10.0.0.1",
+                            "username": "jump",
+                            "hops": [{
+                                "host": "10.0.0.2",
+                                "port": 22,
+                                "username": "app",
+                            }],
+                        },
+                    }
+                }
+            }
+            with open(old_path, "w", encoding="utf-8") as handle:
+                json.dump(old, handle)
+            aged = FileSessionCatalog(old_path).get("s-old")
+            assert aged is not None and aged.ssh is not None
+            self.assertEqual(aged.ssh.hops[0].auth_method, domain.SSHAuthMethod.PASSWORD)
+            self.assertIsNone(aged.ssh.hops[0].private_key_path)
 
     def test_one_node_is_rejected_before_connect(self) -> None:
         opened = []
@@ -154,6 +198,38 @@ class ChainRulesTests(unittest.TestCase):
         self.assertEqual(stored.ssh.hops[0].host, "10.0.0.2")
         self.assertFalse(hasattr(stored, "hop_secrets") and getattr(stored, "hop_secrets", None))
 
+        keyed = domain.SSHConfig(
+            host="10.0.0.1",
+            username="jump",
+            auth_method=domain.SSHAuthMethod.PRIVATE_KEY,
+            private_key_path="C:/keys/jump",
+            hops=(domain.SSHHop(
+                host="10.0.0.2",
+                username="app",
+                auth_method=domain.SSHAuthMethod.AGENT,
+            ),),
+        )
+        service.create_session(
+            "ключ",
+            "journal",
+            provider=domain.ProviderType.SSH_OVER_SSH,
+            ssh=keyed,
+            auth_secret=None,
+            hop_secrets=("",),
+        )
+        assert driver.config is not None
+        self.assertIsNone(driver.config.auth_secret)
+        self.assertEqual(driver.config.hop_secrets, ("",))
+        with self.assertRaises(ValueError):
+            service.create_session(
+                "пустой пароль",
+                "journal",
+                provider=domain.ProviderType.SSH_OVER_SSH,
+                ssh=_chain(),
+                auth_secret="one",
+                hop_secrets=("",),
+            )
+
 
 class ChainDialogTests(unittest.TestCase):
     @classmethod
@@ -175,6 +251,7 @@ class ChainDialogTests(unittest.TestCase):
                 ]
 
         dialog = CreateSessionDialog(Service())  # type: ignore[arg-type]
+        self.assertEqual(dialog.provider_combo.currentData(), "llm")
         dialog.show()
         QApplication.processEvents()
         chain = dialog.provider_combo.findData("ssh_over_ssh")
@@ -196,6 +273,31 @@ class ChainDialogTests(unittest.TestCase):
         self.assertTrue(dialog._llm_container.isVisible())
         self.assertTrue(dialog._chain_container.isVisible())
         self.assertFalse(dialog._ssh_container.isVisible())
+        self.assertEqual(dialog._hop_rows[0].port.value(), 22)
+        dialog._hop_rows[0].host.setText("10.0.0.1")
+        dialog._hop_rows[0].user.setText("jump")
+        dialog._hop_rows[0].port.setValue(2222)
+        dialog._hop_rows[0].password.setText("one")
+        dialog._hop_rows[1].host.setText("10.0.0.2")
+        dialog._hop_rows[1].user.setText("app")
+        dialog._hop_rows[1].port.setValue(2200)
+        dialog._hop_rows[1].auth.setCurrentIndex(
+            dialog._hop_rows[1].auth.findData(domain.SSHAuthMethod.PRIVATE_KEY.value)
+        )
+        dialog._hop_rows[1].key_path.setText("C:/keys/app")
+        self.assertEqual(
+            dialog._chain_route.text(),
+            "jump@10.0.0.1:2222 → app@10.0.0.2:2200",
+        )
+        request = dialog._chain_request("цепочка", "journal", "m-1")
+        assert request is not None and request.ssh is not None
+        self.assertEqual(request.ssh.port, 2222)
+        self.assertEqual(request.ssh.auth_method, domain.SSHAuthMethod.PASSWORD)
+        self.assertEqual(request.auth_secret, "one")
+        self.assertEqual(request.ssh.hops[0].port, 2200)
+        self.assertEqual(request.ssh.hops[0].auth_method, domain.SSHAuthMethod.PRIVATE_KEY)
+        self.assertEqual(request.ssh.hops[0].private_key_path, "C:/keys/app")
+        self.assertEqual(request.hop_secrets, ("",))
         dialog.close()
 
     def test_ok_shows_the_error_and_does_not_stay_busy(self) -> None:

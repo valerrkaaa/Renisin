@@ -316,7 +316,16 @@ QScrollArea#historyScroll, QWidget#historyHost {
 QFrame#hopCard, QWidget#hopCard {
     background: #1b1c22;
     border: 1px solid #2e2f36;
-    border-radius: 12px;
+    border-radius: 10px;
+}
+QLabel#hopIndex {
+    color: #a1a1aa;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#chainRoute {
+    color: #e4e4e7;
+    font-weight: 600;
 }
 QFrame#commandCard {
     background: transparent;

@@ -114,3 +114,59 @@ class UnlockDialogTests(unittest.TestCase):
         self.assertEqual(config.hops[0].username, "ubuntu")
         self.assertEqual(config.hops[0].port, 2200)
         dialog.close()
+
+    def test_open_uses_the_same_rows_as_reconnect(self) -> None:
+        from PySide6.QtWidgets import QLabel, QSizePolicy
+
+        info = domain.SessionInfo(
+            session_id="s-chain",
+            name="цепочка",
+            provider=domain.ProviderType.SSH_OVER_SSH,
+            identity=domain.ExecutionIdentityType.CURRENT_USER,
+            status=domain.SessionStatus.CLOSED,
+            ssh=domain.SSHConfig(
+                host="10.0.0.1",
+                username="root",
+                auth_method=domain.SSHAuthMethod.PASSWORD,
+                hops=(domain.SSHHop(
+                    host="10.0.0.2",
+                    username="ubuntu",
+                    port=2200,
+                    auth_method=domain.SSHAuthMethod.PRIVATE_KEY,
+                    private_key_path="C:/keys/ubuntu",
+                ),),
+            ),
+        )
+        dialog = UnlockSessionDialog(object(), info)  # type: ignore[arg-type]
+        dialog.show()
+        for _ in range(5):
+            QApplication.processEvents()
+        intro = dialog.findChild(QLabel, "sessionIntro")
+        assert intro is not None
+        self.assertEqual(
+            intro.sizePolicy().verticalPolicy(),
+            QSizePolicy.Policy.Maximum,
+        )
+        self.assertEqual(len(dialog._chain_rows), 2)
+        self.assertTrue(all(isinstance(row, _ChainPasswordRow) for row in dialog._chain_rows))
+        self.assertIsNotNone(dialog._chain_rows[0].password)
+        self.assertIsNone(dialog._chain_rows[1].password)
+        assert dialog._chain_rows[1].note is not None
+        self.assertEqual(dialog._chain_rows[1].note.text(), "Используется ключ")
+        self.assertEqual(dialog.findChildren(QPushButton, "auxButton"), [])
+        self.assertFalse(dialog._journal_hint.isHidden())
+        assert dialog._chain_rows[0].password is not None
+        dialog._chain_rows[0].password.setText("one")
+        built = dialog._unlock_chain()
+        assert built is not None
+        config, secret, hops = built
+        self.assertEqual(secret, "one")
+        self.assertEqual(hops, ("",))
+        self.assertEqual(config.auth_method, domain.SSHAuthMethod.PASSWORD)
+        self.assertEqual(config.hops[0].auth_method, domain.SSHAuthMethod.PRIVATE_KEY)
+        self.assertEqual(config.hops[0].private_key_path, "C:/keys/ubuntu")
+        self.assertEqual(
+            dialog._resolved_journal_password(config.auth_method, secret),
+            "one",
+        )
+        dialog.close()

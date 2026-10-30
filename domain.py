@@ -208,6 +208,8 @@ class SSHHop:
     host: str
     port: int = 22
     username: str = ""
+    auth_method: SSHAuthMethod = SSHAuthMethod.PASSWORD
+    private_key_path: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -237,7 +239,8 @@ def ssh_targets(ssh: SSHConfig) -> tuple[SSHConfig, ...]:
             host=hop.host,
             port=hop.port,
             username=hop.username,
-            auth_method=SSHAuthMethod.PASSWORD,
+            auth_method=hop.auth_method,
+            private_key_path=hop.private_key_path,
             connect_timeout=ssh.connect_timeout,
         )
         for hop in ssh.hops

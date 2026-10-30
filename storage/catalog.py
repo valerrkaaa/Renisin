@@ -50,18 +50,31 @@ class FileSessionCatalog:
 
     @staticmethod
     def _hop_to_dict(hop: domain.SSHHop) -> dict:
-        return {
+        payload = {
             "host": hop.host,
             "port": int(hop.port),
             "username": hop.username,
         }
+        if hop.auth_method != domain.SSHAuthMethod.PASSWORD:
+            payload["auth_method"] = hop.auth_method.value
+        if hop.private_key_path:
+            payload["private_key_path"] = hop.private_key_path
+        return payload
 
     @staticmethod
     def _hop_from_dict(raw: dict) -> domain.SSHHop:
+        method = str(raw.get("auth_method") or "password")
+        try:
+            auth = domain.SSHAuthMethod(method)
+        except ValueError:
+            auth = domain.SSHAuthMethod.PASSWORD
+        key = str(raw.get("private_key_path") or "").strip() or None
         return domain.SSHHop(
             host=str(raw.get("host") or ""),
             port=int(raw.get("port", 22)),
             username=str(raw.get("username") or ""),
+            auth_method=auth,
+            private_key_path=key,
         )
 
     @classmethod
