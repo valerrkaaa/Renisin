@@ -14,7 +14,7 @@ def _pixmap(draw) -> QIcon:
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor("#d5deea"))
+    pen = QPen(QColor("#e4e4e7"))
     pen.setWidthF(1.8)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -45,7 +45,7 @@ def paste_run_icon() -> QIcon:
         painter.drawLine(9, 8, 15, 8)
         painter.drawLine(9, 8, 9, 12)
         painter.drawLine(15, 8, 15, 12)
-        painter.setBrush(QColor("#d5deea"))
+        painter.setBrush(QColor("#e4e4e7"))
         painter.drawPolygon(
             [
                 QPoint(20, 12),

@@ -14,15 +14,15 @@ from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
-_SELECT = QColor("#3f3a66")
+_SELECT = QColor("#1f2440")
 
 from screen_log import ScreenLog
 
 PTY_ROWS = 24
 
-_FG = QColor("#ececf1")
-_BG = QColor("#121318")
-_CURSOR = QColor("#a78bfa")
+_FG = QColor("#e4e4e7")
+_BG = QColor("#101113")
+_CURSOR = QColor("#b6b7d8")
 
 _COLORS: Dict[str, str] = {
     "black": "#484f58",

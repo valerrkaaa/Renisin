@@ -57,7 +57,7 @@ class CommandCard(QFrame):
         self.setFrameShape(QFrame.Shape.NoFrame)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
         header = QHBoxLayout()

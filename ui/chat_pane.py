@@ -223,7 +223,7 @@ def command_rich_text(
         for span in line:
             escaped = html.escape(str(getattr(span, "text", "")))
             if getattr(span, "matched", False):
-                bits.append(f'<font color="#4ade80">{escaped}</font>')
+                bits.append(f'<font color="#86efac">{escaped}</font>')
             else:
                 bits.append(escaped)
         lines.append("".join(bits))
@@ -256,9 +256,9 @@ class _CommandText(QTextEdit):
         self._fitting = False
         plain = QTextCharFormat()
         plain.setFont(mono)
-        plain.setForeground(QColor("#ececf1"))
+        plain.setForeground(QColor("#e4e4e7"))
         hit = QTextCharFormat(plain)
-        hit.setForeground(QColor("#4ade80"))
+        hit.setForeground(QColor("#86efac"))
         cursor = self.textCursor()
         cursor.beginEditBlock()
         shown = [part.strip() for part in parts if part and part.strip()]
@@ -317,7 +317,7 @@ class _CommandRequest(QFrame):
         self._parts = parts
         self.setObjectName("commandRequest")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
         title = QLabel("Запрос на выполнение команды")
         title.setObjectName("sidebarTitle")
@@ -600,7 +600,7 @@ class ChatPane(QWidget):
         self._banner = QFrame()
         self._banner.setObjectName("offlineBanner")
         banner_layout = QVBoxLayout(self._banner)
-        banner_layout.setContentsMargins(14, 12, 14, 12)
+        banner_layout.setContentsMargins(10, 8, 10, 8)
         banner_layout.setSpacing(8)
         self._banner_title = QLabel("Модель недоступна")
         self._banner_title.setObjectName("offlineTitle")

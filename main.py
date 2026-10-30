@@ -27,7 +27,18 @@ from storage import (
 from ui import MainWindow
 from ui.hostkey import QtHostKeyVerifier
 from ui.ssh_prompt import QtSshPasswordPrompt
-from ui.styles import VibeStyle
+from ui.styles import (
+    CANVAS,
+    FONT_FAMILY,
+    FONT_SIZE,
+    INPUT,
+    MUTED,
+    SELECTION,
+    SIDEBAR,
+    SURFACE,
+    TEXT,
+    VibeStyle,
+)
 
 
 def _bundle_dir() -> str:
@@ -103,22 +114,22 @@ def main() -> int:
     icon = app_icon()
     app.setWindowIcon(icon)
     app.setStyle(VibeStyle("Fusion"))
-    ui_font = QFont("Segoe UI")
-    ui_font.setPointSize(10)
+    ui_font = QFont(FONT_FAMILY)
+    ui_font.setPixelSize(FONT_SIZE)
     app.setFont(ui_font)
     palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, QColor("#101114"))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor("#f4f4f5"))
-    palette.setColor(QPalette.ColorRole.Base, QColor("#1b1c22"))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#17181d"))
-    palette.setColor(QPalette.ColorRole.Text, QColor("#fafafa"))
-    palette.setColor(QPalette.ColorRole.Button, QColor("#23242a"))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#fafafa"))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor("#3f3a66"))
+    palette.setColor(QPalette.ColorRole.Window, QColor(CANVAS))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Base, QColor(INPUT))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(SIDEBAR))
+    palette.setColor(QPalette.ColorRole.Text, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Button, QColor(SURFACE))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(SELECTION))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#23242a"))
-    palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#fafafa"))
-    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#71717a"))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(SURFACE))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(MUTED))
     app.setPalette(palette)
 
     data_dir = get_data_dir()

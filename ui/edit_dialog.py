@@ -50,7 +50,7 @@ class FileEditDialog(QDialog):
         self.resize(520, 420)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(10)
         self._status = QLabel("Проверяю, что фрагмент встречается в файле один раз…")
         self._status.setWordWrap(True)

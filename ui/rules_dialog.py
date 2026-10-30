@@ -43,7 +43,7 @@ class PatternDialog(QDialog):
         self._pattern_text = ""
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(10)
 
         if os_label:
@@ -55,7 +55,7 @@ class PatternDialog(QDialog):
             "Регулярное выражение. Символ * означает любой текст, например grep *."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8b949e;")
+        hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(hint)
 
         self._pattern = QLineEdit()
@@ -78,7 +78,7 @@ class PatternDialog(QDialog):
 
         self._status = QLabel("")
         self._status.setWordWrap(True)
-        self._status.setStyleSheet("color:#8b949e;")
+        self._status.setStyleSheet("color:#8b8d97;")
         layout.addWidget(self._status)
 
         buttons = QDialogButtonBox(
@@ -114,7 +114,7 @@ class PatternDialog(QDialog):
             return
         if verdict == "match":
             self._mark.setText("✓")
-            self._mark.setStyleSheet("color:#4ade80; font-weight:700;")
+            self._mark.setStyleSheet("color:#86efac; font-weight:700;")
             self._status.setText("Текст совпадает с шаблоном")
             return
         self._mark.setText("✕")
@@ -167,7 +167,7 @@ class RulesDialog(QWidget):
         self._service = service
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(12)
 
         hint = QLabel(
@@ -176,7 +176,7 @@ class RulesDialog(QWidget):
             "каждая её часть совпала хотя бы с одним шаблоном."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8b949e;")
+        hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(hint)
 
         columns = QHBoxLayout()

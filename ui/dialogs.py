@@ -226,7 +226,7 @@ class _ChainPasswordRow(QWidget):
             )
             self.note = QLabel(text)
             self.note.setObjectName("chainAuthNote")
-            self.note.setStyleSheet("color:#a1a1aa;")
+            self.note.setStyleSheet("color:#8b8d97;")
             layout.addWidget(self.note, 1)
 
     def auth_method(self) -> domain.SSHAuthMethod:
@@ -276,14 +276,14 @@ class MasterPasswordDialog(QDialog):
         self.resize(460, 240)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(10)
         hint = QLabel(
             "Нужен для журналов без пароля подключения: локальная консоль "
             "и SSH по ключу. Вводится один раз за запуск и остаётся только в памяти."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8b949e;")
+        hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(hint)
 
         form = QFormLayout()
@@ -299,7 +299,7 @@ class MasterPasswordDialog(QDialog):
 
         self._error = QLabel("")
         self._error.setWordWrap(True)
-        self._error.setStyleSheet("color:#ff8a80; font-weight:600;")
+        self._error.setStyleSheet("color:#fb7185; font-weight:600;")
         self._error.setVisible(False)
         layout.addWidget(self._error)
 
@@ -426,7 +426,7 @@ class CreateSessionDialog(_SessionCallDialog):
         self._fit_to_screen(560, 680)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 14)
+        root.setContentsMargins(12, 12, 12, 10)
         root.setSpacing(10)
         form_host = QWidget()
         layout = QVBoxLayout(form_host)
@@ -439,7 +439,7 @@ class CreateSessionDialog(_SessionCallDialog):
             "он спрашивается один раз за запуск и остаётся только в памяти."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color:#8b949e;")
+        info.setStyleSheet("color:#8b8d97;")
         layout.addWidget(info)
 
         # --- Общие поля ---------------------------------------------------
@@ -469,7 +469,7 @@ class CreateSessionDialog(_SessionCallDialog):
         basic_form.addRow("ОС", self.shell_combo)
         self._shell_hint = QLabel("Для цепочки это ОС последнего узла, где выполняются команды.")
         self._shell_hint.setWordWrap(True)
-        self._shell_hint.setStyleSheet("color:#8b949e;")
+        self._shell_hint.setStyleSheet("color:#8b8d97;")
         basic_form.addRow("", self._shell_hint)
 
         layout.addLayout(basic_form)
@@ -483,7 +483,7 @@ class CreateSessionDialog(_SessionCallDialog):
             "Сначала добавьте модель в настройках."
         )
         self._llm_empty.setWordWrap(True)
-        self._llm_empty.setStyleSheet("color:#8b949e;")
+        self._llm_empty.setStyleSheet("color:#8b8d97;")
         llm_form.addRow("", self._llm_empty)
         self.terminal_combo = QComboBox()
         self.terminal_combo.addItem("CMD (локальная)", "cmd")
@@ -569,7 +569,7 @@ class CreateSessionDialog(_SessionCallDialog):
             "Сверху вниз — порядок входа. Пароли не сохраняются."
         )
         chain_hint.setWordWrap(True)
-        chain_hint.setStyleSheet("color:#8b949e;")
+        chain_hint.setStyleSheet("color:#8b8d97;")
         chain_layout.addWidget(chain_hint)
         self._hop_host = QWidget()
         self._hop_layout = QVBoxLayout(self._hop_host)
@@ -596,12 +596,12 @@ class CreateSessionDialog(_SessionCallDialog):
         # Ошибка и кнопки всегда видны, даже если форма выше окна.
         self._error_label = QLabel("")
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color:#ff8a80; font-weight:600;")
+        self._error_label.setStyleSheet("color:#fb7185; font-weight:600;")
         self._error_label.setVisible(False)
         root.addWidget(self._error_label)
 
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color:#8b949e;")
+        self._status_label.setStyleSheet("color:#8b8d97;")
         self._status_label.setVisible(False)
         root.addWidget(self._status_label)
 
@@ -994,7 +994,7 @@ class UnlockSessionDialog(_SessionCallDialog):
             self._fit_to_screen(480, 280)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 14)
+        root.setContentsMargins(12, 12, 12, 10)
         root.setSpacing(10)
         form_host = QWidget()
         layout = QVBoxLayout(form_host)
@@ -1026,7 +1026,7 @@ class UnlockSessionDialog(_SessionCallDialog):
         ):
             note = QLabel("Журнал откроется мастер-паролем этого запуска.")
             note.setWordWrap(True)
-            note.setStyleSheet("color:#8b949e;")
+            note.setStyleSheet("color:#8b8d97;")
             layout.addWidget(note)
 
         # --- SSH: логин, метод, секрет -----------------------------------
@@ -1097,7 +1097,7 @@ class UnlockSessionDialog(_SessionCallDialog):
             chain_layout.addWidget(route)
             hint = QLabel("Пароль нужен только узлам, которые входят по паролю.")
             hint.setWordWrap(True)
-            hint.setStyleSheet("color:#8b949e;")
+            hint.setStyleSheet("color:#8b8d97;")
             chain_layout.addWidget(hint)
             self._chain_host = QWidget()
             self._chain_layout = QVBoxLayout(self._chain_host)
@@ -1129,12 +1129,12 @@ class UnlockSessionDialog(_SessionCallDialog):
 
         self._error_label = QLabel("")
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color:#ff8a80; font-weight:600;")
+        self._error_label.setStyleSheet("color:#fb7185; font-weight:600;")
         self._error_label.setVisible(False)
         root.addWidget(self._error_label)
 
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color:#8b949e;")
+        self._status_label.setStyleSheet("color:#8b8d97;")
         self._status_label.setVisible(False)
         root.addWidget(self._status_label)
 
@@ -1442,7 +1442,7 @@ class RenameSessionDialog(QDialog):
         self.resize(420, 180)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(12)
 
         hint = QLabel("Это имя видно в списке сессий и в шапке окна.")
@@ -1456,7 +1456,7 @@ class RenameSessionDialog(QDialog):
 
         self._error = QLabel("")
         self._error.setWordWrap(True)
-        self._error.setStyleSheet("color:#ff8a80; font-weight:600;")
+        self._error.setStyleSheet("color:#fb7185; font-weight:600;")
         self._error.setVisible(False)
         layout.addWidget(self._error)
 

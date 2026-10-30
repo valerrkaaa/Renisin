@@ -1284,9 +1284,9 @@ class ChatCardTests(unittest.TestCase):
         assert edit is not None
         cursor = edit.textCursor()
         cursor.setPosition(len("Команда: ") + 1)
-        self.assertEqual(cursor.charFormat().foreground().color().name(), "#4ade80")
+        self.assertEqual(cursor.charFormat().foreground().color().name(), "#86efac")
         cursor.setPosition(len(edit.toPlainText()) - 1)
-        self.assertEqual(cursor.charFormat().foreground().color().name(), "#ececf1")
+        self.assertEqual(cursor.charFormat().foreground().color().name(), "#e4e4e7")
         spans = command_spans(
             command,
             domain.SHELL_WINDOWS,

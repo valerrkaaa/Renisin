@@ -34,7 +34,7 @@ class HostKeyDialog(QDialog):
         self.resize(560, 340)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(12)
 
         if prompt.is_changed:
@@ -43,7 +43,7 @@ class HostKeyDialog(QDialog):
                 "Это может указывать на атаку «человек посередине» либо на "
                 "переустановку сервера. Продолжайте только если уверены."
             )
-            color = "#ff8a80"
+            color = "#fb7185"
         elif prompt.is_known:
             text = (
                 "Хост известен, но предлагает новый тип ключа. "

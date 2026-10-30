@@ -206,7 +206,7 @@ class GeneralChatPage(QWidget):
     def _build_chat(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 12, 12, 14)
+        layout.setContentsMargins(12, 8, 10, 10)
         layout.setSpacing(12)
 
         self._tab_bar = QHBoxLayout()

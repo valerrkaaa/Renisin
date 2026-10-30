@@ -47,7 +47,7 @@ class SettingsDialog(QDialog):
         self.resize(920, 560)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(12)
 
         tabs = QTabWidget()
@@ -77,7 +77,7 @@ class SettingsDialog(QDialog):
             "не ограничивает число сессий."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8b949e;")
+        hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(hint)
 
         form = QFormLayout()
@@ -103,7 +103,7 @@ class SettingsDialog(QDialog):
         self._status = QLabel("")
         self._status.setWordWrap(True)
         self._status.setObjectName("mcpStatus")
-        self._status.setStyleSheet("color:#8b949e;")
+        self._status.setStyleSheet("color:#8b8d97;")
         layout.addWidget(self._status)
 
         self._error = QLabel("")
@@ -195,7 +195,7 @@ class SettingsDialog(QDialog):
             "Он же открывает журналы локальной консоли и входа по ключу."
         )
         self._master_hint.setWordWrap(True)
-        self._master_hint.setStyleSheet("color:#8b949e;")
+        self._master_hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(self._master_hint)
 
         form_master = QFormLayout()
@@ -215,7 +215,7 @@ class SettingsDialog(QDialog):
         self._master_status = QLabel("")
         self._master_status.setWordWrap(True)
         self._master_status.setObjectName("masterStatus")
-        self._master_status.setStyleSheet("color:#8b949e;")
+        self._master_status.setStyleSheet("color:#8b8d97;")
         layout.addWidget(self._master_status)
         self._master_error = QLabel("")
         self._master_error.setWordWrap(True)
@@ -245,7 +245,7 @@ class SettingsDialog(QDialog):
             "такое подключение сообщит, что нужна первичная настройка."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8b949e;")
+        hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(hint)
 
         form = QFormLayout()
@@ -274,7 +274,7 @@ class SettingsDialog(QDialog):
         self._key_status = QLabel("")
         self._key_status.setWordWrap(True)
         self._key_status.setObjectName("sshKeyStatus")
-        self._key_status.setStyleSheet("color:#8b949e;")
+        self._key_status.setStyleSheet("color:#8b8d97;")
         layout.addWidget(self._key_status)
         self._key_error = QLabel("")
         self._key_error.setWordWrap(True)

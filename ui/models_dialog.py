@@ -54,7 +54,7 @@ class ProfileFormDialog(QDialog):
         self.resize(480, 340)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(12)
 
         hint = QLabel(
@@ -62,7 +62,7 @@ class ProfileFormDialog(QDialog):
             "Профиль сохранится, только если указанный id есть в ответе."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8b949e;")
+        hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(hint)
 
         form = QFormLayout()
@@ -92,12 +92,12 @@ class ProfileFormDialog(QDialog):
 
         self._error = QLabel("")
         self._error.setWordWrap(True)
-        self._error.setStyleSheet("color:#ff8a80; font-weight:600;")
+        self._error.setStyleSheet("color:#fb7185; font-weight:600;")
         self._error.setVisible(False)
         layout.addWidget(self._error)
 
         self._status = QLabel("")
-        self._status.setStyleSheet("color:#8b949e;")
+        self._status.setStyleSheet("color:#8b8d97;")
         self._status.setVisible(False)
         layout.addWidget(self._status)
 
@@ -200,14 +200,14 @@ class ModelsDialog(QWidget):
         self._service = service
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(10)
 
         hint = QLabel(
             "Каждая сессия типа LLM использует ровно один сохранённый профиль."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8b949e;")
+        hint.setStyleSheet("color:#8b8d97;")
         layout.addWidget(hint)
 
         self._list = QListWidget()
@@ -215,7 +215,7 @@ class ModelsDialog(QWidget):
 
         self._empty = QLabel("Пока нет моделей. Добавьте подключение.")
         self._empty.setWordWrap(True)
-        self._empty.setStyleSheet("color:#8b949e;")
+        self._empty.setStyleSheet("color:#8b8d97;")
         layout.addWidget(self._empty)
 
         row = QHBoxLayout()

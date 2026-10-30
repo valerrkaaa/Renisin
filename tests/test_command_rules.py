@@ -77,8 +77,8 @@ class PatternTests(unittest.TestCase):
         spans = command_spans("cmd1 && cmd2 | cmd3", "unix", rules)
         html = command_rich_text("cmd1 && cmd2 | cmd3", ("cmd1 && cmd2 | cmd3",), spans)
         assert html is not None
-        self.assertIn('<font color="#4ade80">cmd1</font>', html)
-        self.assertNotIn('<font color="#4ade80">cmd2</font>', html)
+        self.assertIn('<font color="#86efac">cmd1</font>', html)
+        self.assertNotIn('<font color="#86efac">cmd2</font>', html)
         self.assertIn("&amp;&amp;", html)
         self.assertIsNone(command_rich_text("ls", ("ls",), ()))
 

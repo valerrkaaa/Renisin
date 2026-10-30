@@ -220,7 +220,7 @@ class _SessionRow(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10 + depth * 16, 8, 8, 8)
+        layout.setContentsMargins(8 + depth * 14, 4, 6, 4)
         layout.setSpacing(8)
         self._label = QLabel(text)
         self._label.setObjectName("sessionMuted" if muted else "sessionName")
@@ -466,7 +466,7 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         panel.setObjectName("sideBar")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
         title = QLabel("Сессии")
@@ -518,8 +518,8 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         panel.setObjectName("workArea")
         root = QVBoxLayout(panel)
-        root.setContentsMargins(22, 18, 22, 18)
-        root.setSpacing(14)
+        root.setContentsMargins(14, 10, 14, 10)
+        root.setSpacing(8)
 
         header = QHBoxLayout()
         header.setSpacing(10)
@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(14)
+        left_layout.setSpacing(8)
 
         self._offline_banner = QFrame()
         self._offline_banner.setObjectName("offlineBanner")
@@ -821,7 +821,7 @@ class MainWindow(QMainWindow):
         item.setData(0, _KIND_ROLE, kind)
         item.setText(0, text)
         if muted:
-            item.setForeground(0, QColor("#8b949e"))
+            item.setForeground(0, QColor("#8b8d97"))
         if parent is None:
             self.session_list.addTopLevelItem(item)
         else:
