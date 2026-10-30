@@ -17,13 +17,18 @@ def connection_journal_password(
     ssh: Optional[domain.SSHConfig],
     auth_secret: Optional[str],
     hop_secrets: tuple[str, ...] = (),
+    install_key: tuple[bool, ...] = (),
 ) -> Optional[str]:
     """Пароль машины, где выполняются команды.
 
     Для цепочки это последний узел. Вход по ключу или агенту пароля не даёт:
-    passphrase ключа журналом не является. None значит, что нужен мастер-пароль.
+    passphrase ключа журналом не является. Галочка «Записать мой ключ» на этом
+    узле тоже: пароль нужен один раз, чтобы дописать ключ, журнал открывает
+    мастер-пароль. None значит, что нужен мастер-пароль.
     """
     if ssh is None:
+        return None
+    if _installed_on_journal_node(provider, ssh, install_key):
         return None
     if provider == domain.ProviderType.SSH_OVER_SSH and ssh.hops:
         secret = hop_secrets[-1] if hop_secrets else ""
@@ -31,6 +36,22 @@ def connection_journal_password(
     if provider == domain.ProviderType.SSH:
         return _account_password(ssh.auth_method, auth_secret)
     return None
+
+
+def _installed_on_journal_node(
+    provider: domain.ProviderType,
+    ssh: domain.SSHConfig,
+    install_key: tuple[bool, ...],
+) -> bool:
+    if not install_key:
+        return False
+    if provider == domain.ProviderType.SSH_OVER_SSH and ssh.hops:
+        index = len(ssh.hops)
+    elif provider == domain.ProviderType.SSH:
+        index = 0
+    else:
+        return False
+    return index < len(install_key) and bool(install_key[index])
 
 
 def _account_password(
@@ -93,6 +114,13 @@ class MasterPassword:
                 return
             self._password = None
             self._digest = None
+
+    def reset(self) -> None:
+        """Забыть пароль этого запуска, даже если журнал его уже принял."""
+        with self._lock:
+            self._password = None
+            self._digest = None
+            self._proven = False
 
     def reveal(self) -> str:
         with self._lock:

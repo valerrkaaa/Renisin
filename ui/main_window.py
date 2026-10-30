@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 
 import domain
 from application import ApplicationService
-from application.service import LlmUnavailable
+from application.service import LlmUnavailable, SessionUnavailable
 from application.command_rules import fully_allowed
 from application.terminal_mcp import (
     CommandAnswer,
@@ -55,7 +55,12 @@ from shell_takeover import looks_like_secret_prompt
 from ui.chat_pane import ChatPane
 from ui.command_input import CommandInput, command_needs_more
 from ui.command_card import CommandCard
-from ui.dialogs import CreateSessionDialog, UnlockSessionDialog
+from ui.dialogs import (
+    CreateSessionDialog,
+    MasterPasswordDialog,
+    UnlockSessionDialog,
+    ask_journal_password,
+)
 from ui.general_chat import GENERAL_CHAT_ID, GENERAL_CHAT_TITLE, GeneralChatPage
 from ui.edit_dialog import FileEditDialog
 from ui.icons import gear_icon, paste_icon, paste_run_icon
@@ -476,7 +481,7 @@ class MainWindow(QMainWindow):
         self.settings_button = QPushButton("Настройки")
         self.settings_button.setObjectName("secondaryButton")
         self.settings_button.setToolTip(
-            "Модели, правила команд и адрес MCP."
+            "Модели, правила команд, адрес MCP, мастер-пароль и ключ SSH."
         )
         self.settings_button.clicked.connect(self._on_settings)
         layout.addWidget(self.settings_button)
@@ -1013,6 +1018,8 @@ class MainWindow(QMainWindow):
         stored = self._service.get_session(session_id)
         if stored is None:
             return
+        if self._open_with_master_passphrase(stored):
+            return
 
         dialog = UnlockSessionDialog(self._service, stored, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1020,6 +1027,66 @@ class MainWindow(QMainWindow):
         info = dialog.opened_session()
         if info is not None:
             self._activate_session(session_id)
+
+    def _open_with_master_passphrase(
+        self, stored: domain.SessionInfo, reconnect: bool = False
+    ) -> bool:
+        """Ключ открывается мастер-паролем этого запуска, без окна и без passphrase."""
+        ready = getattr(self._service, "opens_with_master_passphrase", None)
+        if not callable(ready) or not ready(stored):
+            return False
+        must_ask = getattr(self._service, "needs_master_password", None)
+        needs_master = must_ask(stored, reconnect) if callable(must_ask) else not reconnect
+        has_master = getattr(self._service, "has_master_password", None)
+        if needs_master and not (callable(has_master) and has_master()):
+            prompted = MasterPasswordDialog(self._service, self)
+            if prompted.exec() != QDialog.DialogCode.Accepted:
+                return True
+        if reconnect:
+            try:
+                self._service.reconnect_session(stored.session_id)
+            except SessionUnavailable:
+                return True
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "Не удалось открыть", str(exc) or "Не удалось открыть сессию"
+                )
+            return True
+        journal = ask_journal_password(
+            self._service,
+            stored.provider,
+            stored.ssh,
+            None,
+            (),
+            self,
+        )
+        if not journal:
+            return True
+        try:
+            self._service.open_session(stored.session_id, journal)
+        except domain.JournalAuthError as exc:
+            forget = getattr(self._service, "forget_unproven_master_password", None)
+            if callable(forget):
+                forget()
+            QMessageBox.warning(self, "Не удалось открыть", str(exc))
+            return True
+        except SessionUnavailable:
+            prove = getattr(self._service, "prove_master_password", None)
+            if callable(prove):
+                prove()
+            self._activate_session(stored.session_id)
+            return True
+        except Exception as exc:
+            forget = getattr(self._service, "forget_unproven_master_password", None)
+            if callable(forget):
+                forget()
+            QMessageBox.warning(self, "Не удалось открыть", str(exc) or "Не удалось открыть сессию")
+            return True
+        prove = getattr(self._service, "prove_master_password", None)
+        if callable(prove):
+            prove()
+        self._activate_session(stored.session_id)
+        return True
 
     def _on_close_session(self) -> None:
         sid = self._active_session_id
@@ -1423,6 +1490,13 @@ class MainWindow(QMainWindow):
             return
         stored = self._service.get_session(sid)
         if stored is None:
+            return
+        if self._open_with_master_passphrase(stored, reconnect=True):
+            self._update_header()
+            self._update_input_state()
+            self._reload_sessions()
+            if self._service.session_state(sid) == "ready":
+                self._sync_chat(sid)
             return
         dialog = UnlockSessionDialog(self._service, stored, self, reconnect=True)
         dialog.exec()

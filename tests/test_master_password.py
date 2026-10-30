@@ -51,6 +51,21 @@ class JournalPasswordTests(unittest.TestCase):
         self.assertIsNone(
             connection_journal_password(domain.ProviderType.CMD, None, None)
         )
+        password_ssh = domain.SSHConfig(host="10.0.0.1", username="root")
+        self.assertIsNone(
+            connection_journal_password(
+                domain.ProviderType.SSH,
+                password_ssh,
+                "machine",
+                install_key=(True,),
+            )
+        )
+        self.assertEqual(
+            connection_journal_password(
+                domain.ProviderType.SSH, password_ssh, "machine"
+            ),
+            "machine",
+        )
 
     def test_master_password_is_checked_by_hash_once(self) -> None:
         master = MasterPassword()
@@ -65,8 +80,12 @@ class JournalPasswordTests(unittest.TestCase):
         master.prove()
         master.forget_unproven()
         self.assertEqual(master.reveal(), "one")
+        master.reset()
+        self.assertFalse(master.ready())
+        master.establish("other", "other")
+        self.assertEqual(master.reveal(), "other")
         with self.assertRaises(ValueError):
-            master.establish("other", "other")
+            master.establish("nope", "nope")
 
     def test_dialog_keeps_the_master_password_for_the_process(self) -> None:
         from PySide6.QtWidgets import QApplication

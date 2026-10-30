@@ -254,6 +254,32 @@ def ssh_location(ssh: SSHConfig) -> str:
     return " → ".join(parts)
 
 
+def ssh_config_from_targets(targets: tuple[SSHConfig, ...]) -> SSHConfig:
+    """Собрать цепочку обратно после того, как у узлов сменился способ входа."""
+    if not targets:
+        raise ValueError("Нет узлов SSH")
+    first, *rest = targets
+    hops = tuple(
+        SSHHop(
+            host=item.host,
+            port=item.port,
+            username=item.username,
+            auth_method=item.auth_method,
+            private_key_path=item.private_key_path,
+        )
+        for item in rest
+    )
+    return SSHConfig(
+        host=first.host,
+        port=first.port,
+        username=first.username,
+        auth_method=first.auth_method,
+        private_key_path=first.private_key_path,
+        connect_timeout=first.connect_timeout,
+        hops=hops,
+    )
+
+
 @dataclass(frozen=True)
 class SessionConfig:
     session_id: SessionId
@@ -265,6 +291,12 @@ class SessionConfig:
     auth_secret: Optional[str] = None
     # Пароли узлов после первого. Тоже не сохраняются.
     hop_secrets: tuple[str, ...] = ()
+    # Галочки «записать мой ключ» по узлам. В каталог не попадают.
+    install_key: tuple[bool, ...] = ()
+    # Путь из настроек. Пустой — первичная настройка ключа не сделана.
+    identity_key_path: Optional[str] = None
+    # Passphrase ключа из настроек. Не сохраняется: это мастер-пароль запуска.
+    identity_passphrase: Optional[str] = None
 
 
 @dataclass(frozen=True)

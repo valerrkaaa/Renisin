@@ -24,6 +24,12 @@ import domain
 import file_edit
 import shell_takeover
 from application.ports import HostKeyVerifier
+from application.ssh_key import (
+    install_authorized_key,
+    load_private_key,
+    public_line,
+    require_configured_key,
+)
 from screen_log import ScreenLog
 
 
@@ -246,9 +252,14 @@ class SSHSessionDriver:
         self,
         host_key_verifier: HostKeyVerifier,
         known_hosts_path: str,
+        password_prompt=None,
     ) -> None:
         self._host_key_verifier = host_key_verifier
         self._known_hosts_path = known_hosts_path
+        self._password_prompt = password_prompt
+        self._resolved_ssh: Optional[domain.SSHConfig] = None
+        self._identity_key = None
+        self._identity_passphrase: Optional[str] = None
 
         self._sink: Optional[Callable[[domain.OutputEvent], None]] = None
         self._session_id: Optional[domain.SessionId] = None
@@ -312,6 +323,10 @@ class SSHSessionDriver:
         ).start()
 
         return config.session_id
+
+    def resolved_ssh(self) -> Optional[domain.SSHConfig]:
+        """Цепочка после записи ключа: узлы с галочкой становятся входом по ключу."""
+        return self._resolved_ssh
 
     def send(self, request: domain.CommandRequest) -> None:
         with self._lock:
@@ -610,39 +625,58 @@ class SSHSessionDriver:
         """Первый узел напрямую, каждый следующий — каналом через предыдущий."""
         ssh = config.ssh
         assert ssh is not None
-        targets = domain.ssh_targets(ssh)
+        targets = list(domain.ssh_targets(ssh))
         secrets: List[Optional[str]] = [config.auth_secret, *config.hop_secrets]
         if len(secrets) < len(targets):
             raise ValueError("Не хватает пароля для узла цепочки")
         if config.provider == domain.ProviderType.SSH_OVER_SSH and len(targets) < 2:
             raise ValueError("В цепочке SSH нужно хотя бы два узла")
+        install = tuple(config.install_key)
+        if config.identity_passphrase:
+            self._identity_passphrase = config.identity_passphrase
+        if any(install):
+            require_configured_key(config.identity_key_path or "")
 
         opened: List[paramiko.SSHClient] = []
-        sock = None
+        previous = None
+        resolved: List[domain.SSHConfig] = []
         try:
             for index, target in enumerate(targets):
-                client = self._connect_one(target, secrets[index], sock)
+                def open_sock(prev=previous, nxt=target):
+                    if prev is None:
+                        return None
+                    try:
+                        return prev.open_channel(
+                            "direct-tcpip",
+                            (nxt.host, int(nxt.port)),
+                            ("127.0.0.1", 0),
+                        )
+                    except Exception as exc:
+                        raise ValueError(
+                            f"С предыдущего узла не открылся SSH "
+                            f"к {nxt.username}@{nxt.host}:{nxt.port}: {exc}"
+                        ) from exc
+
+                if index < len(install) and install[index]:
+                    target, client = self._connect_installing(
+                        target,
+                        secrets[index],
+                        config.identity_key_path or "",
+                        open_sock,
+                    )
+                else:
+                    client = self._connect_one(target, secrets[index], open_sock())
+                resolved.append(target)
                 opened.append(client)
                 if index + 1 >= len(targets):
                     break
-                nxt = targets[index + 1]
-                transport = client.get_transport()
-                if transport is None or not transport.is_active():
+                previous = client.get_transport()
+                if previous is None or not previous.is_active():
                     raise ValueError(
                         f"Узел {index + 1} ({target.username}@{target.host}) "
                         "не держит соединение"
                     )
-                try:
-                    sock = transport.open_channel(
-                        "direct-tcpip",
-                        (nxt.host, int(nxt.port)),
-                        ("127.0.0.1", 0),
-                    )
-                except Exception as exc:
-                    raise ValueError(
-                        f"С узла {index + 1} не открылся SSH "
-                        f"к {nxt.username}@{nxt.host}:{nxt.port}: {exc}"
-                    ) from exc
+            self._resolved_ssh = domain.ssh_config_from_targets(tuple(resolved))
         except Exception:
             for client in reversed(opened):
                 try:
@@ -652,6 +686,78 @@ class SSHSessionDriver:
             raise
         final = opened.pop()
         return final, opened
+
+    def _connect_installing(
+        self,
+        target: domain.SSHConfig,
+        password: Optional[str],
+        identity: str,
+        open_sock,
+    ) -> tuple:
+        """Проба ключа из настроек. Если хост его не пускает — пароль и authorized_keys."""
+        key = self._load_identity(identity)
+        line = public_line(key)
+        key_target = domain.SSHConfig(
+            host=target.host,
+            port=target.port,
+            username=target.username,
+            auth_method=domain.SSHAuthMethod.PRIVATE_KEY,
+            private_key_path=identity,
+            connect_timeout=target.connect_timeout,
+        )
+        probed = self._try_connect(key_target, self._identity_passphrase, open_sock())
+        if probed is not None:
+            return key_target, probed
+        secret = password or self._ask_password(
+            f"Пароль SSH для {target.username}@{target.host}"
+        )
+        if not secret:
+            raise ValueError(
+                f"Введите пароль SSH для {target.username}@{target.host}"
+            )
+        password_target = domain.SSHConfig(
+            host=target.host,
+            port=target.port,
+            username=target.username,
+            auth_method=domain.SSHAuthMethod.PASSWORD,
+            connect_timeout=target.connect_timeout,
+        )
+        logged = self._connect_one(password_target, secret, open_sock())
+        try:
+            install_authorized_key(logged, line)
+        finally:
+            logged.close()
+        return key_target, self._connect_one(
+            key_target, self._identity_passphrase, open_sock()
+        )
+
+    def _try_connect(self, ssh: domain.SSHConfig, secret: Optional[str], sock):
+        try:
+            return self._connect_one(ssh, secret, sock)
+        except ValueError as exc:
+            if str(exc).startswith("Ошибка аутентификации"):
+                return None
+            raise
+
+    def _load_identity(self, path: str):
+        if self._identity_key is not None:
+            return self._identity_key
+        try:
+            key = load_private_key(path, self._identity_passphrase)
+        except paramiko.PasswordRequiredException:
+            phrase = self._ask_password(f"Passphrase ключа {path}")
+            if not phrase:
+                raise ValueError("Нужна passphrase ключа из настроек") from None
+            key = load_private_key(path, phrase)
+            self._identity_passphrase = phrase
+        self._identity_key = key
+        return key
+
+    def _ask_password(self, prompt: str) -> str:
+        ask = self._password_prompt
+        if not callable(ask):
+            return ""
+        return str(ask(prompt) or "")
 
     def _connect_one(
         self,

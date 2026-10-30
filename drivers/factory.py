@@ -15,9 +15,11 @@ class DriverFactory:
         self,
         host_key_verifier: HostKeyVerifier,
         known_hosts_path: str,
+        password_prompt=None,
     ) -> None:
         self._host_key_verifier = host_key_verifier
         self._known_hosts_path = known_hosts_path
+        self._password_prompt = password_prompt
 
     def __call__(self, provider: domain.ProviderType) -> SessionDriver:
         if provider == domain.ProviderType.CMD:
@@ -29,5 +31,6 @@ class DriverFactory:
             return SSHSessionDriver(
                 host_key_verifier=self._host_key_verifier,
                 known_hosts_path=self._known_hosts_path,
+                password_prompt=self._password_prompt,
             )
         raise ValueError(f"Неподдерживаемый провайдер: {provider!r}")

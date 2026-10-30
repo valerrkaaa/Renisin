@@ -8,6 +8,7 @@ from storage.journal import EncryptedJournalRepository
 from storage.llm_profiles import FileLlmProfileStore
 from storage.lounge import FileLoungeStore
 from storage.mcp_settings import FileMcpSettings
+from storage.ssh_key import FileSshKeySettings
 
 __all__ = [
     "FileCommandAllowStore",
@@ -17,4 +18,5 @@ __all__ = [
     "FileLlmProfileStore",
     "FileLoungeStore",
     "FileMcpSettings",
+    "FileSshKeySettings",
 ]

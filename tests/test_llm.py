@@ -736,7 +736,7 @@ class ChatUiTests(unittest.TestCase):
         assert tabs is not None
         self.assertEqual(
             [tabs.tabText(index) for index in range(tabs.count())],
-            ["MCP", "Модели", "Правила"],
+            ["MCP", "Ключ SSH", "Модели", "Правила"],
         )
         self.assertEqual(dialog._host.text(), "127.0.0.1")
         self.assertEqual(dialog._ports.text(), "47321-47340")

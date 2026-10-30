@@ -16,6 +16,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -113,6 +114,12 @@ class _HopFields(QWidget):
         secret.addWidget(self._key_row, 1)
         secret.addWidget(self.passphrase)
         layout.addWidget(self._secret_host)
+        self.install_key = QCheckBox("Записать мой ключ")
+        self.install_key.setToolTip(
+            "Если хост уже пускает ключом из настроек, пароль не нужен. "
+            "Иначе ключ будет добавлен в authorized_keys."
+        )
+        layout.addWidget(self.install_key)
 
         self.host.textChanged.connect(lambda _text: self.changed.emit())
         self.user.textChanged.connect(lambda _text: self.changed.emit())
@@ -144,6 +151,12 @@ class _HopFields(QWidget):
             return self.passphrase.text()
         return ""
 
+    def wants_install(self) -> bool:
+        return (
+            self.auth_method() == domain.SSHAuthMethod.PASSWORD
+            and self.install_key.isChecked()
+        )
+
     def clear_secret(self) -> None:
         self.password.clear()
         self.passphrase.clear()
@@ -156,6 +169,9 @@ class _HopFields(QWidget):
         self._key_row.setVisible(is_key)
         self.passphrase.setVisible(is_key)
         self._secret_host.setVisible(is_password or is_key)
+        self.install_key.setVisible(is_password)
+        if not is_password:
+            self.install_key.setChecked(False)
         self.changed.emit()
 
     def _browse_key(self) -> None:
@@ -242,6 +258,7 @@ class NewSessionRequest:
     hop_secrets: tuple[str, ...] = ()
     llm_profile_id: Optional[str] = None
     shell_family: str = domain.SHELL_UNIX
+    install_key: tuple[bool, ...] = ()
 
 
 class MasterPasswordDialog(QDialog):
@@ -317,9 +334,12 @@ def ask_journal_password(
     auth_secret: Optional[str],
     hop_secrets: tuple[str, ...],
     parent: Optional[QWidget] = None,
+    install_key: tuple[bool, ...] = (),
 ) -> Optional[str]:
     """Пароль журнала: пароль последней машины или мастер-пароль этого запуска."""
-    bound = connection_journal_password(provider, ssh, auth_secret, hop_secrets)
+    bound = connection_journal_password(
+        provider, ssh, auth_secret, hop_secrets, install_key
+    )
     if bound:
         return bound
     if service.has_master_password():
@@ -526,6 +546,12 @@ class CreateSessionDialog(_SessionCallDialog):
         self._ssh_form.addRow("Пароль SSH", self.ssh_password)
         self._ssh_form.addRow("Ключ", key_row)
         self._ssh_form.addRow("Passphrase", self.ssh_passphrase)
+        self.ssh_install = QCheckBox("Записать мой ключ")
+        self.ssh_install.setToolTip(
+            "Если хост уже пускает ключом из настроек, пароль не нужен. "
+            "Иначе ключ будет добавлен в authorized_keys."
+        )
+        self._ssh_form.addRow("", self.ssh_install)
         layout.addWidget(self._ssh_container)
 
         self._chain_container = QWidget()
@@ -647,6 +673,9 @@ class CreateSessionDialog(_SessionCallDialog):
         is_key = method == domain.SSHAuthMethod.PRIVATE_KEY.value
 
         self._set_row_visible(self.ssh_password, is_password)
+        self._set_row_visible(self.ssh_install, is_password)
+        if not is_password:
+            self.ssh_install.setChecked(False)
         self._set_row_visible(self.ssh_key_path, is_key)
         self.ssh_key_browse.setVisible(is_key)
         self._set_row_visible(self.ssh_passphrase, is_key)
@@ -769,8 +798,9 @@ class CreateSessionDialog(_SessionCallDialog):
                 self._set_error("Укажите пользователя SSH")
                 return
             if method == domain.SSHAuthMethod.PASSWORD and not secret:
-                self._set_error("Введите пароль SSH")
-                return
+                if not self.ssh_install.isChecked():
+                    self._set_error("Введите пароль SSH")
+                    return
             if method == domain.SSHAuthMethod.PRIVATE_KEY and not key_path:
                 self._set_error("Укажите файл приватного ключа")
                 return
@@ -789,6 +819,7 @@ class CreateSessionDialog(_SessionCallDialog):
                 auth_secret=secret,
                 llm_profile_id=llm_profile_id,
                 shell_family=self._shell_family(),
+                install_key=(True,) if self.ssh_install.isChecked() else (),
             )
 
         journal_password = ask_journal_password(
@@ -798,9 +829,17 @@ class CreateSessionDialog(_SessionCallDialog):
             request.auth_secret,
             request.hop_secrets,
             self,
+            request.install_key,
         )
         if journal_password is None:
             return
+        if any(request.install_key):
+            uses = getattr(self._service, "ssh_key_uses_master_passphrase", None)
+            has = getattr(self._service, "has_master_password", None)
+            if callable(uses) and uses() and callable(has) and not has():
+                prompted = MasterPasswordDialog(self._service, self)
+                if prompted.exec() != QDialog.DialogCode.Accepted:
+                    return
         request.journal_password = journal_password
         secret = request.auth_secret
 
@@ -815,6 +854,7 @@ class CreateSessionDialog(_SessionCallDialog):
                     hop_secrets=request.hop_secrets,
                     llm_profile_id=request.llm_profile_id,
                     shell_family=request.shell_family,
+                    install_key=request.install_key,
                 )
             finally:
                 request.auth_secret = None
@@ -860,6 +900,7 @@ class CreateSessionDialog(_SessionCallDialog):
             return None
         hops: list[domain.SSHHop] = []
         secrets: list[str] = []
+        install: list[bool] = []
         first_host = ""
         first_user = ""
         first_port = 22
@@ -877,13 +918,18 @@ class CreateSessionDialog(_SessionCallDialog):
             if not user:
                 self._set_error(f"Укажите логин узла {index}")
                 return None
-            if method == domain.SSHAuthMethod.PASSWORD and not row.password.text():
+            if (
+                method == domain.SSHAuthMethod.PASSWORD
+                and not row.password.text()
+                and not row.wants_install()
+            ):
                 self._set_error(f"Введите пароль узла {index}")
                 return None
             if method == domain.SSHAuthMethod.PRIVATE_KEY and not key_path:
                 self._set_error(f"Укажите файл ключа узла {index}")
                 return None
             secret = row.secret()
+            install.append(row.wants_install())
             if index == 1:
                 first_host = host
                 first_user = user
@@ -916,6 +962,7 @@ class CreateSessionDialog(_SessionCallDialog):
             hop_secrets=tuple(secrets),
             llm_profile_id=llm_profile_id,
             shell_family=self._shell_family(),
+            install_key=tuple(install),
         )
 
 

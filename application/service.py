@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import threading
 import time
@@ -125,6 +126,7 @@ class ApplicationService:
         lounge_store=None,
         command_rules=None,
         mcp_settings=None,
+        ssh_key_settings=None,
     ) -> None:
         self._driver_factory = driver_factory
         self._catalog = catalog
@@ -134,6 +136,7 @@ class ApplicationService:
         self._command_allow = command_allow
         self._command_rules = command_rules
         self._mcp_settings = mcp_settings
+        self._ssh_key = ssh_key_settings
         self._master = MasterPassword()
         self._lounge_store = lounge_store
         self._lounge_tabs: List[domain.LoungeTab] = []
@@ -610,6 +613,175 @@ class ApplicationService:
     def forget_unproven_master_password(self) -> None:
         self._master.forget_unproven()
 
+    def reset_master_password(self) -> None:
+        """Забыть мастер-пароль этого запуска. Ключ SSH и его passphrase остаются."""
+        self._master.reset()
+
+    def ssh_key_path(self) -> str:
+        settings = self._ssh_key
+        if settings is None:
+            return ""
+        return settings.load()
+
+    def ssh_key_uses_master_passphrase(self) -> bool:
+        settings = self._ssh_key
+        if settings is None or not settings.load():
+            return False
+        return bool(settings.passphrase_is_master())
+
+    def opens_with_master_passphrase(self, info: domain.SessionInfo) -> bool:
+        """Вход по ключу или агенту: окно сессии не нужно, хватает мастер-пароля."""
+        if info.provider not in (
+            domain.ProviderType.SSH,
+            domain.ProviderType.SSH_OVER_SSH,
+        ):
+            return False
+        ssh = info.ssh
+        if ssh is None:
+            return False
+        for node in domain.ssh_targets(ssh):
+            if node.auth_method == domain.SSHAuthMethod.PASSWORD:
+                return False
+            if node.auth_method != domain.SSHAuthMethod.PRIVATE_KEY:
+                continue
+            path = (node.private_key_path or "").strip()
+            if not path:
+                return False
+            if self._key_needs_passphrase(path) and not self._same_master_key(path):
+                return False
+        return True
+
+    def needs_master_password(
+        self, info: domain.SessionInfo, reconnect: bool = False
+    ) -> bool:
+        """Открытие журнала просит мастер-пароль. Повтор соединения — только passphrase ключа."""
+        if not reconnect:
+            return True
+        ssh = info.ssh
+        if ssh is None:
+            return False
+        for node in domain.ssh_targets(ssh):
+            path = (node.private_key_path or "").strip()
+            if (
+                node.auth_method == domain.SSHAuthMethod.PRIVATE_KEY
+                and path
+                and self._same_master_key(path)
+                and self._key_needs_passphrase(path)
+            ):
+                return True
+        return False
+
+    def _same_master_key(self, path: str) -> bool:
+        if not self.ssh_key_uses_master_passphrase():
+            return False
+        configured = self.ssh_key_path()
+        if not configured or not path.strip():
+            return False
+        left = os.path.normcase(os.path.abspath(path.strip()))
+        right = os.path.normcase(os.path.abspath(configured))
+        if left == right:
+            return True
+        try:
+            return os.path.samefile(path, configured)
+        except OSError:
+            return False
+
+    def _key_needs_passphrase(self, path: str) -> bool:
+        cleaned = (path or "").strip()
+        if not cleaned or not os.path.isfile(cleaned):
+            return False
+        from application.ssh_key import load_private_key
+
+        try:
+            load_private_key(cleaned, None)
+        except Exception as exc:
+            return exc.__class__.__name__ == "PasswordRequiredException"
+        return False
+
+    def _passphrase_for_file(self, path: str) -> Optional[str]:
+        """Ключ без шифрования не получает passphrase: чужая строка для него неверна."""
+        if not self._key_needs_passphrase(path):
+            return None
+        if not self._master.ready():
+            return None
+        return self.master_password()
+
+    def set_ssh_key_path(
+        self,
+        path: str,
+        passphrase_is_master: Optional[bool] = None,
+    ) -> None:
+        """Запомнить ключ. Пустая строка сбрасывает первичную настройку."""
+        if self._ssh_key is None:
+            raise RuntimeError("Хранилище ключа SSH не подключено")
+        cleaned = path.strip()
+        if cleaned and not self._master.ready():
+            raise ValueError("Сначала задайте мастер-пароль в настройках")
+        if cleaned:
+            if not os.path.isfile(cleaned):
+                raise ValueError("Файл ключа не найден")
+            from application.ssh_key import load_private_key
+
+            try:
+                load_private_key(cleaned, None)
+            except Exception as exc:
+                if exc.__class__.__name__ != "PasswordRequiredException":
+                    raise ValueError(str(exc) or "Файл не является ключом SSH") from exc
+        self._ssh_key.save(cleaned, passphrase_is_master)
+
+    def generate_ssh_key(self, path: str, passphrase: str = "") -> str:
+        """Создать новый ключ и запомнить его.
+
+        Пустая passphrase шифрует ключ мастер-паролем. При следующем запуске
+        этот пароль подставляется в passphrase и подключение открывается сразу.
+        """
+        cleaned = path.strip()
+        if not cleaned:
+            raise ValueError("Укажите, куда сохранить ключ")
+        if not self._master.ready():
+            raise ValueError("Сначала задайте мастер-пароль в настройках")
+        use_master = not passphrase
+        secret = self.master_password() if use_master else passphrase
+        from application.ssh_key import generate_ed25519
+
+        generate_ed25519(cleaned, secret)
+        self.set_ssh_key_path(cleaned, passphrase_is_master=use_master)
+        return cleaned
+
+    def _master_key_passphrase(self) -> Optional[str]:
+        path = self.ssh_key_path()
+        if not path or not self._same_master_key(path):
+            return None
+        return self._passphrase_for_file(path)
+
+    def _with_master_passphrase(
+        self,
+        ssh: Optional[domain.SSHConfig],
+        auth_secret: Optional[str],
+        hop_secrets: tuple[str, ...],
+    ) -> tuple[Optional[str], tuple[str, ...]]:
+        """В зашифрованный ключ ставится мастер-пароль. Ключ без passphrase идёт без неё."""
+        if ssh is None:
+            return auth_secret, hop_secrets
+        targets = domain.ssh_targets(ssh)
+        secrets: List[Optional[str]] = [auth_secret, *hop_secrets]
+        while len(secrets) < len(targets):
+            secrets.append(None)
+        filled: List[Optional[str]] = []
+        for node, given in zip(targets, secrets):
+            path = (node.private_key_path or "").strip()
+            if node.auth_method == domain.SSHAuthMethod.PRIVATE_KEY and path:
+                if not self._key_needs_passphrase(path):
+                    filled.append(None)
+                elif self._same_master_key(path) and self._master.ready():
+                    filled.append(self.master_password())
+                else:
+                    filled.append(given)
+            else:
+                filled.append(given)
+        rest = tuple(item or "" for item in filled[1:len(targets)])
+        return filled[0], rest
+
     # --- сценарии ---------------------------------------------------------
 
     def create_session(
@@ -622,13 +794,17 @@ class ApplicationService:
         hop_secrets: tuple[str, ...] = (),
         llm_profile_id: Optional[domain.ProfileId] = None,
         shell_family: str = domain.SHELL_UNIX,
+        install_key: tuple[bool, ...] = (),
     ) -> domain.SessionInfo:
         if not name.strip():
             raise ValueError("Имя сессии не может быть пустым")
         if not password:
             raise ValueError("Пароль журнала не может быть пустым")
         if provider in (domain.ProviderType.SSH, domain.ProviderType.SSH_OVER_SSH):
-            self._check_ssh(provider, ssh, auth_secret, hop_secrets)
+            auth_secret, hop_secrets = self._with_master_passphrase(
+                ssh, auth_secret, hop_secrets
+            )
+            self._check_ssh(provider, ssh, auth_secret, hop_secrets, install_key)
         if llm_profile_id and (
             self._llm_profiles is None
             or self._llm_profiles.get(llm_profile_id) is None
@@ -644,6 +820,11 @@ class ApplicationService:
             ssh=ssh,
             auth_secret=auth_secret,
             hop_secrets=hop_secrets,
+            install_key=tuple(install_key),
+            identity_key_path=self.ssh_key_path() if any(install_key) else None,
+            identity_passphrase=(
+                self._master_key_passphrase() if any(install_key) else None
+            ),
         )
 
         self._journal.create(session_id, password)
@@ -656,13 +837,19 @@ class ApplicationService:
             self._journal.delete(session_id)
             raise
 
+        saved_ssh = config.ssh
+        resolved = getattr(driver, "resolved_ssh", None)
+        if callable(resolved):
+            updated = resolved()
+            if updated is not None:
+                saved_ssh = updated
         info = domain.SessionInfo(
             session_id=session_id,
             name=config.name,
             provider=config.provider,
             identity=config.identity,
             status=domain.SessionStatus.READY,
-            ssh=config.ssh,
+            ssh=saved_ssh,
             llm_profile_id=llm_profile_id,
             shell_family=domain.normalize_shell_family(shell_family),
         )
@@ -718,6 +905,9 @@ class ApplicationService:
                 updated = replace(stored, ssh=ssh)
                 self._catalog.save(updated)
                 stored = updated
+            auth_secret, hop_secrets = self._with_master_passphrase(
+                ssh, auth_secret, hop_secrets
+            )
             self._check_ssh(stored.provider, ssh, auth_secret, hop_secrets)
 
         self._journal.unlock(session_id, password)
@@ -730,6 +920,7 @@ class ApplicationService:
             ssh=ssh,
             auth_secret=auth_secret,
             hop_secrets=hop_secrets,
+            identity_passphrase=self._master_key_passphrase(),
         )
         driver = self._driver_factory(config.provider)
         driver.set_event_sink(self._handle_driver_event)
@@ -777,6 +968,9 @@ class ApplicationService:
                 updated = replace(stored, ssh=ssh)
                 self._catalog.save(updated)
                 stored = updated
+            auth_secret, hop_secrets = self._with_master_passphrase(
+                ssh, auth_secret, hop_secrets
+            )
             self._check_ssh(stored.provider, ssh, auth_secret, hop_secrets)
 
         self._release_driver(session_id)
@@ -788,6 +982,7 @@ class ApplicationService:
             ssh=ssh,
             auth_secret=auth_secret,
             hop_secrets=hop_secrets,
+            identity_passphrase=self._master_key_passphrase(),
         )
         driver = self._driver_factory(config.provider)
         driver.set_event_sink(self._handle_driver_event)
@@ -2033,6 +2228,7 @@ class ApplicationService:
         ssh: Optional[domain.SSHConfig],
         auth_secret: Optional[str],
         hop_secrets: tuple[str, ...],
+        install_key: tuple[bool, ...] = (),
     ) -> None:
         if ssh is None:
             raise ValueError("Не указаны параметры SSH-подключения")
@@ -2049,11 +2245,20 @@ class ApplicationService:
                 raise ValueError(f"Укажите адрес узла {index}")
             if not hop.username.strip():
                 raise ValueError(f"Укажите логин узла {index}")
-        self._require_ssh_secret(1, ssh.auth_method, auth_secret, ssh.private_key_path)
+        self._require_ssh_secret(
+            1, ssh.auth_method, auth_secret, ssh.private_key_path, install_key, 0
+        )
         if len(hop_secrets) != len(ssh.hops):
             raise ValueError("Не хватает данных входа для узла цепочки")
         for index, (hop, secret) in enumerate(zip(ssh.hops, hop_secrets), start=2):
-            self._require_ssh_secret(index, hop.auth_method, secret, hop.private_key_path)
+            self._require_ssh_secret(
+                index,
+                hop.auth_method,
+                secret,
+                hop.private_key_path,
+                install_key,
+                index - 1,
+            )
 
     @staticmethod
     def _require_ssh_secret(
@@ -2061,12 +2266,16 @@ class ApplicationService:
         method: domain.SSHAuthMethod,
         secret: Optional[str],
         key_path: Optional[str],
+        install_key: tuple[bool, ...] = (),
+        install_index: int = 0,
     ) -> None:
         if method == domain.SSHAuthMethod.PRIVATE_KEY:
             if not (key_path or "").strip():
                 raise ValueError(f"Укажите файл ключа узла {index}")
             return
         if method == domain.SSHAuthMethod.AGENT:
+            return
+        if install_index < len(install_key) and install_key[install_index]:
             return
         if not secret:
             raise ValueError(f"Введите пароль узла {index}")

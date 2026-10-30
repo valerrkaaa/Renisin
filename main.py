@@ -22,9 +22,11 @@ from storage import (
     FileLoungeStore,
     FileMcpSettings,
     FileSessionCatalog,
+    FileSshKeySettings,
 )
 from ui import MainWindow
 from ui.hostkey import QtHostKeyVerifier
+from ui.ssh_prompt import QtSshPasswordPrompt
 from ui.styles import VibeStyle
 
 
@@ -136,6 +138,7 @@ def main() -> int:
     factory = DriverFactory(
         host_key_verifier=host_key_verifier,
         known_hosts_path=os.path.join(data_dir, "known_hosts"),
+        password_prompt=QtSshPasswordPrompt(),
     )
 
     service = ApplicationService(
@@ -148,6 +151,7 @@ def main() -> int:
         command_rules=command_rules,
         lounge_store=FileLoungeStore(os.path.join(data_dir, "lounge.json")),
         mcp_settings=mcp_settings,
+        ssh_key_settings=FileSshKeySettings(os.path.join(data_dir, "ssh_key.json")),
     )
     try:
         service.attach_mcp(
