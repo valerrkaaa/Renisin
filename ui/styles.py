@@ -765,6 +765,14 @@ QTextEdit#chatInput {{
     selection-background-color: {SELECTION};
     selection-color: #ffffff;
 }}
+QLabel#chatModelName {{
+    color: {TEXT};
+    font-weight: 600;
+    padding: 2px 2px 0 2px;
+}}
+QLabel#chatModelHint, QLabel#chatModelEmpty {{
+    color: {MUTED};
+}}
 QLabel#chatPlaceholder {{
     color: {MUTED};
     background: transparent;

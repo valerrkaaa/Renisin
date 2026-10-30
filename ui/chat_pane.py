@@ -13,6 +13,7 @@ from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextOption
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -41,6 +42,7 @@ _OLD_LINE = re.compile(r"^(?:old|было|старое)\s*[:=]\s*\|?\s*(.*)$", r
 _NEW_LINE = re.compile(r"^(?:new|стало|новое)\s*[:=]\s*\|?\s*(.*)$", re.IGNORECASE)
 _THINKING_FRAMES = ("Думает", "Думает.", "Думает..", "Думает...")
 _SELECTABLE = ("chatUser", "chatAssistant", "chatPlain", "shellCode")
+_PREVIEW_LIMIT = 240
 
 
 class _SelectableText(QTextEdit):
@@ -280,6 +282,7 @@ class _CommandText(QTextEdit):
         self.document().setDocumentMargin(0)
         self.viewport().setAutoFillBackground(False)
         self._fitting = False
+        self.viewport().installEventFilter(self)
         plain = QTextCharFormat()
         plain.setFont(mono)
         plain.setForeground(QColor("#e4e4e7"))
@@ -301,6 +304,13 @@ class _CommandText(QTextEdit):
         cursor.endEditBlock()
         self._fit()
 
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
+            if self.verticalScrollBar().maximum() > 0:
+                return False
+            return _forward_wheel(self, event)
+        return super().eventFilter(obj, event)
+
     def minimumSizeHint(self) -> QSize:  # type: ignore[override]
         return QSize(0, self.fontMetrics().lineSpacing())
 
@@ -320,8 +330,14 @@ class _CommandText(QTextEdit):
             if width > 20:
                 self.document().setTextWidth(width)
             height = int(self.document().size().height()) + 4
-            if self.height() != height:
-                self.setFixedHeight(max(22, height))
+            capped = min(height, _PREVIEW_LIMIT)
+            self.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+                if height > _PREVIEW_LIMIT
+                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            if self.height() != capped:
+                self.setFixedHeight(max(22, capped))
         finally:
             self._fitting = False
 
@@ -423,11 +439,11 @@ class _CommandRequest(QFrame):
         self._output = QPlainTextEdit()
         self._output.setObjectName("commandCapture")
         self._output.setFont(mono)
-        self._output.setReadOnly(False)
-        self._output.setEnabled(False)
+        self._output.setReadOnly(True)
         self._output.setPlaceholderText("Вывод команды")
         self._output.setMinimumHeight(96)
         self._output.setMaximumHeight(280)
+        self._output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._output.setVisible(False)
         layout.addWidget(self._output)
         self._captured = ""
@@ -483,6 +499,7 @@ class _CommandRequest(QFrame):
         if rich is None:
             code = FittedText(command_caption(self._command, parts), self._mono)
             code.setObjectName("shellCode")
+            code.set_scroll_limit(_PREVIEW_LIMIT)
             return code
         return _CommandText(self._mono, parts, spans)
 
@@ -502,7 +519,7 @@ class _CommandRequest(QFrame):
         for button in self._approval:
             button.hide()
         self._output.setVisible(True)
-        self._output.setEnabled(False)
+        self._output.setReadOnly(True)
         self._output.setPlainText("")
         self._review_row.setVisible(False)
         self._editable = False
@@ -528,7 +545,8 @@ class _CommandRequest(QFrame):
         if not self._editable:
             self._output.setPlainText(shown)
         self._output.setVisible(True)
-        self._output.setEnabled(False)
+        if not self._editable:
+            self._output.setReadOnly(True)
         self._review_row.setVisible(True)
         for button in self._review_buttons:
             button.setEnabled(True)
@@ -536,7 +554,7 @@ class _CommandRequest(QFrame):
 
     def _redact_output(self) -> None:
         self._editable = True
-        self._output.setEnabled(True)
+        self._output.setReadOnly(False)
         self._output.setFocus()
         self._review_buttons[1].hide()
 
@@ -545,7 +563,7 @@ class _CommandRequest(QFrame):
         edited = text != self._captured
         for button in self._review_buttons:
             button.setEnabled(False)
-        self._output.setEnabled(False)
+        self._output.setReadOnly(True)
         self.output_decided.emit(
             self._request_id, text, edited, self._model_text, self._exit_code
         )
@@ -553,7 +571,7 @@ class _CommandRequest(QFrame):
     def _choose(self, action: str, reason: str) -> None:
         for button in self._buttons + self._review_buttons:
             button.setEnabled(False)
-        self._output.setEnabled(False)
+        self._output.setReadOnly(True)
         self._reason.setReadOnly(True)
         self.decided.emit(self._request_id, action, reason)
 
@@ -566,10 +584,12 @@ class ChatPane(QWidget):
     insert_command = Signal(str)
     apply_edit = Signal(str, str, str)
     reset_requested = Signal()
+    clear_requested = Signal()
     command_decided = Signal(str, str, str)
     output_decided = Signal(str, str, bool, str, object)
     rule_requested = Signal(str)
     limit_changed = Signal(int)
+    model_requested = Signal(str)
 
     def __init__(self, mono: QFont, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -584,6 +604,11 @@ class ChatPane(QWidget):
         title.setObjectName("sidebarTitle")
         head.addWidget(title)
         head.addStretch(1)
+        self._model_combo = QComboBox()
+        self._model_combo.setObjectName("chatModelCombo")
+        self._model_combo.setMinimumWidth(180)
+        self._model_combo.activated.connect(self._on_header_model)
+        head.addWidget(self._model_combo)
         self._auto_run = QCheckBox("Авто")
         self._auto_run.setObjectName("autoRun")
         self._auto_run.setChecked(True)
@@ -599,6 +624,14 @@ class ChatPane(QWidget):
             "Если выключено, ответ уходит сразу."
         )
         head.addWidget(self._review_output)
+        self._clear = QPushButton("Очистить")
+        self._clear.setObjectName("auxButton")
+        self._clear.setToolTip(
+            "Остановить ответ, сбросить контекст модели\n"
+            "и убрать сообщения из этого чата."
+        )
+        self._clear.clicked.connect(self.clear_requested.emit)
+        head.addWidget(self._clear)
         self._usage_tokens = 0
         self._usage_messages = 0
         self._usage = QPushButton("лимит")
@@ -677,6 +710,11 @@ class ChatPane(QWidget):
         self._scroll = scroll
         scroll.viewport().installEventFilter(self)
         root.addWidget(scroll, 1)
+        self._picker = self._build_picker()
+        root.addWidget(self._picker, 1)
+        self._picker.setVisible(False)
+        self._bound = True
+        self._current_model = ""
         self._fitting = False
         self._fit_again = False
 
@@ -684,7 +722,10 @@ class ChatPane(QWidget):
         box.setObjectName("inputPanel")
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(8, 4, 8, 4)
-        box_layout.setSpacing(0)
+        box_layout.setSpacing(4)
+        self._model_name = QLabel("")
+        self._model_name.setObjectName("chatModelName")
+        box_layout.addWidget(self._model_name)
         self._input = QTextEdit()
         self._input.setObjectName("chatInput")
         self._input.setFont(mono)
@@ -705,6 +746,7 @@ class ChatPane(QWidget):
         row.addWidget(self._input, 1)
         row.addWidget(self._send, 0)
         box_layout.addLayout(row)
+        self._input_box = box
         root.addWidget(box)
 
         self._thinking = QLabel(_THINKING_FRAMES[0])
@@ -714,6 +756,106 @@ class ChatPane(QWidget):
         self._thinking_timer.setInterval(420)
         self._thinking_timer.timeout.connect(self._advance_thinking)
         self._request_card: QWidget | None = None
+
+    def _build_picker(self) -> QWidget:
+        host = QWidget()
+        host.setObjectName("chatModelPicker")
+        outer = QVBoxLayout(host)
+        outer.setContentsMargins(24, 24, 24, 24)
+        column = QWidget()
+        column.setMaximumWidth(360)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        hint = QLabel("Выберите модель для этого чата")
+        hint.setObjectName("chatModelHint")
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+        self._picker_combo = QComboBox()
+        self._picker_combo.setObjectName("chatModelPickerCombo")
+        self._picker_combo.activated.connect(self._on_picker_model)
+        layout.addWidget(self._picker_combo)
+        self._picker_empty = QLabel("Сначала добавьте модель в настройках.")
+        self._picker_empty.setObjectName("chatModelEmpty")
+        self._picker_empty.setWordWrap(True)
+        self._picker_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._picker_empty.setVisible(False)
+        layout.addWidget(self._picker_empty)
+        outer.addStretch(1)
+        outer.addWidget(column, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(1)
+        return host
+
+    def set_models(self, items: List[Tuple[str, str, str]], current_id: str) -> None:
+        """Список сохранённых моделей. Пустой current_id — модель ещё не выбрана."""
+        self._current_model = current_id
+        self._fill_model_combo(self._model_combo, items, current_id, placeholder=False)
+        self._fill_model_combo(self._picker_combo, items, "", placeholder=True)
+        names = {profile_id: name for profile_id, name, _model in items}
+        bound = bool(current_id)
+        self._bound = bound
+        self._picker.setVisible(not bound)
+        self._scroll.setVisible(bound)
+        self._input_box.setVisible(bound)
+        for widget in (
+            self._model_combo,
+            self._auto_run,
+            self._review_output,
+            self._clear,
+            self._usage,
+        ):
+            widget.setVisible(bound)
+        has_models = bool(items)
+        self._picker_combo.setVisible(not bound and has_models)
+        self._picker_empty.setVisible(not bound and not has_models)
+        if bound:
+            self._model_name.setText(names.get(current_id) or "Модель не найдена")
+        else:
+            self._banner.setVisible(False)
+            self._model_name.clear()
+
+    def popup_unbound_model(self) -> None:
+        """Раскрыть список, если модель ещё не выбрана и есть из чего выбирать."""
+        combo = self._picker_combo
+        if self._bound or not combo.isVisible() or combo.count() <= 1:
+            return
+
+        def open() -> None:
+            if not self._bound and combo.isVisible():
+                combo.showPopup()
+
+        QTimer.singleShot(0, open)
+
+    def _fill_model_combo(
+        self,
+        combo: QComboBox,
+        items: List[Tuple[str, str, str]],
+        current_id: str,
+        placeholder: bool,
+    ) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        if placeholder:
+            combo.addItem("Выберите модель", "")
+        for profile_id, name, model_id in items:
+            label = name
+            if model_id and model_id != name:
+                label = f"{name}  ·  {model_id}"
+            combo.addItem(label, profile_id)
+        if current_id:
+            combo.setCurrentIndex(combo.findData(current_id))
+        combo.blockSignals(False)
+
+    def _on_picker_model(self, index: int) -> None:
+        profile_id = str(self._picker_combo.itemData(index) or "")
+        if profile_id:
+            self.model_requested.emit(profile_id)
+
+    def _on_header_model(self, index: int) -> None:
+        profile_id = str(self._model_combo.itemData(index) or "")
+        if profile_id and profile_id != self._current_model:
+            self.model_requested.emit(profile_id)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         scroll = getattr(self, "_scroll", None)
@@ -901,7 +1043,7 @@ class ChatPane(QWidget):
         self._banner_title.setText(title or "Модель недоступна")
         tool_failure = title == "Ответ не завершён"
         self._retry.setVisible(not tool_failure)
-        self._banner.setVisible(bool(text))
+        self._banner.setVisible(bool(text) and self._bound)
 
     def is_busy(self) -> bool:
         return self._input.isReadOnly()

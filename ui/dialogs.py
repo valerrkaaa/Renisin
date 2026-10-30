@@ -445,7 +445,6 @@ class CreateSessionDialog(_SessionCallDialog):
         self.provider_combo.addItem("CMD (локальная)", "cmd")
         self.provider_combo.addItem("SSH", "ssh")
         self.provider_combo.addItem("SSH через SSH", "ssh_over_ssh")
-        self.provider_combo.addItem("LLM", "llm")
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         basic_form.addRow("Тип", self.provider_combo)
 
@@ -467,26 +466,6 @@ class CreateSessionDialog(_SessionCallDialog):
         basic_form.addRow("", self._shell_hint)
 
         layout.addLayout(basic_form)
-
-        self._llm_container = QWidget()
-        llm_form = QFormLayout(self._llm_container)
-        llm_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        self.profile_combo = QComboBox()
-        llm_form.addRow("Модель", self.profile_combo)
-        self._llm_empty = QLabel(
-            "Сначала добавьте модель в настройках."
-        )
-        self._llm_empty.setWordWrap(True)
-        self._llm_empty.setStyleSheet("color:#8b8d97;")
-        llm_form.addRow("", self._llm_empty)
-        self.terminal_combo = QComboBox()
-        self.terminal_combo.addItem("CMD (локальная)", "cmd")
-        self.terminal_combo.addItem("SSH", "ssh")
-        self.terminal_combo.addItem("SSH через SSH", "ssh_over_ssh")
-        self.terminal_combo.currentIndexChanged.connect(self._on_provider_changed)
-        llm_form.addRow("Терминал", self.terminal_combo)
-        layout.addWidget(self._llm_container)
-        self._fill_profiles()
 
         # --- SSH поля -----------------------------------------------------
 
@@ -613,9 +592,6 @@ class CreateSessionDialog(_SessionCallDialog):
         self._buttons.rejected.connect(self.reject)
         root.addWidget(self._buttons)
 
-        llm = self.provider_combo.findData("llm")
-        if llm >= 0:
-            self.provider_combo.setCurrentIndex(llm)
         self._on_provider_changed()
         self._on_auth_changed()
 
@@ -626,27 +602,10 @@ class CreateSessionDialog(_SessionCallDialog):
 
     # --- вспомогательное --------------------------------------------------
 
-    def _fill_profiles(self) -> None:
-        self.profile_combo.clear()
-        for profile in self._service.list_llm_profiles():
-            self.profile_combo.addItem(
-                f"{profile.name}  ·  {profile.model_id}", profile.profile_id
-            )
-        empty = self.profile_combo.count() == 0
-        self._llm_empty.setVisible(empty)
-        self.profile_combo.setVisible(not empty)
-
-    def _terminal_kind(self) -> str:
-        if self.provider_combo.currentData() == "llm":
-            return str(self.terminal_combo.currentData())
-        return str(self.provider_combo.currentData())
-
     def _on_provider_changed(self) -> None:
-        is_llm = self.provider_combo.currentData() == "llm"
-        kind = self._terminal_kind()
+        kind = str(self.provider_combo.currentData())
         is_ssh = kind == "ssh"
         is_chain = kind == "ssh_over_ssh"
-        self._llm_container.setVisible(is_llm)
         self._ssh_container.setVisible(is_ssh)
         self._chain_container.setVisible(is_chain)
         self._shell_hint.setVisible(is_chain)
@@ -655,8 +614,7 @@ class CreateSessionDialog(_SessionCallDialog):
         )
         self._clear_error()
         if not self._busy and self._ok_button is not None:
-            blocked = is_llm and self.profile_combo.count() == 0
-            self._ok_button.setEnabled(not blocked)
+            self._ok_button.setEnabled(True)
 
     def _shell_family(self) -> str:
         return str(self.shell_combo.currentData() or domain.SHELL_UNIX)
@@ -749,14 +707,6 @@ class CreateSessionDialog(_SessionCallDialog):
 
         provider_key = self.provider_combo.currentData()
         llm_profile_id = None
-        if provider_key == "llm":
-            llm_profile_id = self.profile_combo.currentData()
-            if not llm_profile_id:
-                self._set_error(
-                    "Сначала добавьте модель в настройках."
-                )
-                return
-            provider_key = self.terminal_combo.currentData()
 
         if provider_key == "cmd":
             request = NewSessionRequest(

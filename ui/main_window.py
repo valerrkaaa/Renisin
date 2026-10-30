@@ -731,7 +731,9 @@ class MainWindow(QMainWindow):
         self.chat_pane.insert_command.connect(self._on_chat_insert_command)
         self.chat_pane.apply_edit.connect(self._on_chat_apply_edit)
         self.chat_pane.reset_requested.connect(self._on_chat_reset)
+        self.chat_pane.clear_requested.connect(self._on_chat_clear)
         self.chat_pane.limit_changed.connect(self._on_chat_limit)
+        self.chat_pane.model_requested.connect(self._on_chat_model)
         self._work_split = QSplitter(Qt.Orientation.Horizontal)
         self._work_split.setChildrenCollapsible(False)
         self._work_split.addWidget(left)
@@ -1768,41 +1770,84 @@ class MainWindow(QMainWindow):
 
     def _sync_chat(self, session_id: Optional[domain.SessionId]) -> None:
         info = self._service.get_session(session_id) if session_id else None
-        if info is None or not info.llm_profile_id:
+        if info is None:
             self.chat_pane.setVisible(False)
             self._set_split_gap(False)
             self._sync_panel_toggles()
             return
-        messages = []
-        try:
-            history = self._service.get_history(session_id)
-        except Exception:
-            history = []
-        for event in history:
-            if event.event_type == domain.EventType.CHAT_OS:
-                messages.append(("os", event.payload))
-            elif event.event_type == domain.EventType.CHAT_USER:
-                messages.append(("user", event.payload))
-            elif event.event_type == domain.EventType.CHAT_ASSISTANT:
-                messages.append(("assistant", event.payload))
-            elif event.event_type == domain.EventType.CHAT_RESET:
-                messages.append(("reset", ""))
-            elif event.event_type == domain.EventType.CHAT_TOOL:
-                messages.append(("result", event.payload))
         opening = not self.chat_pane.isVisible()
         self.chat_pane.setVisible(self._chat_panel_open)
         self._set_split_gap(self._chat_panel_open)
-        self.chat_pane.set_messages(messages)
-        self._show_chat_context(session_id)
-        waiting = session_id in self._chat_wait
-        self.chat_pane.set_thinking(waiting)
-        self.chat_pane.set_busy(waiting)
-        self.chat_pane.set_input_text(self._chat_drafts.get(session_id, ""))
-        self.chat_pane.set_problem(self._chat_problem(session_id, info))
-        self._show_pending_mcp(session_id)
+        current = info.llm_profile_id or ""
+        self.chat_pane.set_models(self._chat_model_items(current), current)
+        if current:
+            messages = []
+            try:
+                history = self._service.get_history(session_id)
+            except Exception:
+                history = []
+            for event in history:
+                if event.event_type == domain.EventType.CHAT_CLEAR:
+                    messages = []
+                    continue
+                if event.event_type == domain.EventType.CHAT_OS:
+                    messages.append(("os", event.payload))
+                elif event.event_type == domain.EventType.CHAT_USER:
+                    messages.append(("user", event.payload))
+                elif event.event_type == domain.EventType.CHAT_ASSISTANT:
+                    messages.append(("assistant", event.payload))
+                elif event.event_type == domain.EventType.CHAT_RESET:
+                    messages.append(("reset", ""))
+                elif event.event_type == domain.EventType.CHAT_TOOL:
+                    messages.append(("result", event.payload))
+            self.chat_pane.set_messages(messages)
+            self._show_chat_context(session_id)
+            waiting = session_id in self._chat_wait
+            self.chat_pane.set_thinking(waiting)
+            self.chat_pane.set_busy(waiting)
+            self.chat_pane.set_input_text(self._chat_drafts.get(session_id, ""))
+            self.chat_pane.set_problem(self._chat_problem(session_id, info))
+            self._show_pending_mcp(session_id)
+        else:
+            self.chat_pane.set_thinking(False)
+            self.chat_pane.set_busy(False)
+            self.chat_pane.set_problem("")
         if self._chat_panel_open and opening:
             self._work_split.setSizes([500, 420])
+            if not current:
+                self.chat_pane.popup_unbound_model()
         self._sync_panel_toggles()
+
+    def _chat_model_items(self, current: str = "") -> list:
+        listing = getattr(self._service, "list_llm_profiles", None)
+        items = []
+        if listing is not None:
+            items = [
+                (profile.profile_id, profile.name, profile.model_id)
+                for profile in listing()
+            ]
+        if current and all(profile_id != current for profile_id, _name, _model in items):
+            getter = getattr(self._service, "get_llm_profile", None)
+            profile = getter(current) if getter is not None else None
+            if profile is not None:
+                items.append((profile.profile_id, profile.name, profile.model_id))
+        return items
+
+    def _on_chat_model(self, profile_id: str) -> None:
+        sid = self._active_session_id
+        if not sid or sid == GENERAL_CHAT_ID or not profile_id:
+            return
+        assign = getattr(self._service, "assign_llm_profile", None)
+        if assign is None:
+            return
+        try:
+            assign(sid, profile_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось выбрать модель", str(exc))
+            self._sync_chat(sid)
+            return
+        self._refresh_attach_buttons(sid)
+        self._sync_chat(sid)
 
     def _toggle_sessions(self, _checked: bool = False) -> None:
         show = not self._sidebar.isVisible()
@@ -1824,12 +1869,30 @@ class MainWindow(QMainWindow):
             if self._active_session_id
             else None
         )
-        if info is None or not info.llm_profile_id:
+        if info is None:
             return
         if self.chat_pane.isVisible():
             self._save_chat_draft(self._active_session_id)
         self._chat_panel_open = not self._chat_panel_open
         self._sync_chat(self._active_session_id)
+
+    def _refresh_attach_buttons(self, session_id: domain.SessionId) -> None:
+        layout = self._layouts.get(session_id)
+        info = self._service.get_session(session_id)
+        show = bool(info and info.llm_profile_id)
+        if layout is None:
+            return
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if not isinstance(widget, CommandCard):
+                continue
+            if widget.command in ("Система", "Команда"):
+                continue
+            if show and not widget.property("attachBound"):
+                widget.attach_requested.connect(self._on_attach_command)
+                widget.setProperty("attachBound", True)
+            widget.set_attach_visible(show)
 
     def _sync_panel_toggles(self) -> None:
         shown = self._sidebar.isVisible()
@@ -1842,7 +1905,7 @@ class MainWindow(QMainWindow):
             if self._active_session_id and self._active_session_id != GENERAL_CHAT_ID
             else None
         )
-        has_chat = bool(info and info.llm_profile_id)
+        has_chat = info is not None
         self._chat_toggle.setEnabled(has_chat)
         self._chat_toggle.setChecked(has_chat and self.chat_pane.isVisible())
 
@@ -2116,6 +2179,39 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Не удалось сбросить контекст", str(exc))
 
+    def _on_chat_clear(self) -> None:
+        sid = self._active_session_id
+        if sid is None or self.chat_pane.isHidden():
+            return
+        answer = QMessageBox.question(
+            self,
+            "Очистить чат",
+            "Ответ модели остановится, контекст сбросится,\n"
+            "а сообщения исчезнут из этого чата.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        cancel = getattr(self._service, "cancel_chat", None)
+        if cancel is not None:
+            cancel(sid)
+        self._drop_session_mcp(sid, "чат очищен")
+        try:
+            self._service.clear_chat(sid)
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось очистить чат", str(exc))
+            return
+        self._chat_wait.discard(sid)
+        self._chat_drafts[sid] = ""
+        self.chat_pane.clear_input()
+        self.chat_pane.set_busy(False)
+        self.chat_pane.set_thinking(False)
+        self.chat_pane.set_problem("")
+        self.chat_pane.clear_command_request()
+        self.chat_pane.set_messages([])
+        self._show_chat_context(sid)
+
     def _on_chat_apply_edit(self, path: str, old: str, new: str) -> None:
         sid = self._active_session_id
         if sid is None:
@@ -2308,10 +2404,15 @@ class MainWindow(QMainWindow):
             domain.EventType.CHAT_USER,
             domain.EventType.CHAT_ASSISTANT,
             domain.EventType.CHAT_RESET,
+            domain.EventType.CHAT_CLEAR,
             domain.EventType.CHAT_OS,
             domain.EventType.CHAT_TOOL,
         ):
             if active == sid and not self.chat_pane.isHidden():
+                if event.event_type == domain.EventType.CHAT_CLEAR:
+                    self.chat_pane.set_messages([])
+                    self._show_chat_context(sid)
+                    return
                 if event.event_type == domain.EventType.CHAT_RESET:
                     role = "reset"
                 elif event.event_type == domain.EventType.CHAT_OS:
@@ -2495,6 +2596,7 @@ class MainWindow(QMainWindow):
                 and widget.command not in ("Система", "Команда")
             ):
                 widget.set_attach_visible(True)
+                widget.setProperty("attachBound", True)
                 widget.attach_requested.connect(self._on_attach_command)
         target.insertWidget(index, widget)
         self._scroll_to_bottom(scroll or self.history_scroll)
@@ -2910,6 +3012,15 @@ class MainWindow(QMainWindow):
         for prompt, finish in pending:
             self._record_tool_outcome(prompt, "reject_reason", reason)
             finish(CommandAnswer("reject_reason", reason))
+
+    def _drop_session_mcp(self, session_id: str, reason: str) -> None:
+        item = self._mcp_pending.pop(session_id, None)
+        if item is None:
+            return
+        prompt, finish = item
+        self.chat_pane.clear_command_request()
+        self._record_tool_outcome(prompt, "reject_reason", reason)
+        finish(CommandAnswer("reject_reason", reason))
         
     def _on_tab_complete(self) -> None:
         sid = self._active_session_id

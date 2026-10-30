@@ -505,6 +505,65 @@ class ServiceTests(unittest.TestCase):
             )
         )
 
+    def test_assign_profile_keeps_the_chat(self) -> None:
+        client = _Client()
+        service, _driver, journal, _profiles, _client = _service(client)
+        kind = domain.LlmApiKind.LM_STUDIO
+        first = service.save_llm_profile(
+            domain.LlmProfile("m-1", "первая", "http://127.0.0.1:1234/v1", "demo", api_kind=kind)
+        )
+        second = service.save_llm_profile(
+            domain.LlmProfile("m-2", "вторая", "http://127.0.0.1:1234/v1", "demo", api_kind=kind)
+        )
+        info = service.create_session("работа", "pw", llm_profile_id=first.profile_id)
+        service.send_chat(info.session_id, "старое")
+        before = [
+            event.payload
+            for event in journal.events
+            if event.event_type == domain.EventType.CHAT_USER
+        ]
+        updated = service.assign_llm_profile(info.session_id, second.profile_id)
+        self.assertEqual(updated.llm_profile_id, second.profile_id)
+        again = service.get_session(info.session_id)
+        assert again is not None
+        self.assertEqual(again.llm_profile_id, second.profile_id)
+        after = [
+            event.payload
+            for event in journal.events
+            if event.event_type == domain.EventType.CHAT_USER
+        ]
+        self.assertEqual(after, before)
+        self.assertGreater(service.chat_context(info.session_id).messages, 0)
+        with self.assertRaises(ValueError):
+            service.assign_llm_profile(info.session_id, "missing")
+
+    def test_clear_chat_forgets_context_and_stops_the_reply(self) -> None:
+        client = _Client()
+        service, _driver, journal, _profiles, _client = _service(client)
+        saved = service.save_llm_profile(
+            domain.LlmProfile(
+                "m-1", "локальная", "http://127.0.0.1:1234/v1", "demo",
+                api_kind=domain.LlmApiKind.LM_STUDIO,
+            )
+        )
+        info = service.create_session("работа", "pw", llm_profile_id=saved.profile_id)
+        service.send_chat(info.session_id, "старое")
+        self.assertGreater(service.chat_context(info.session_id).messages, 0)
+        service.clear_chat(info.session_id)
+        self.assertEqual(service.chat_context(info.session_id).messages, 0)
+        self.assertTrue(
+            any(event.event_type == domain.EventType.CHAT_CLEAR for event in journal.events)
+        )
+        self.assertTrue(
+            any(
+                event.event_type == domain.EventType.CHAT_USER and event.payload == "старое"
+                for event in journal.events
+            )
+        )
+        service.send_chat(info.session_id, "новое")
+        texts = [text for role, text in client.seen[-1] if role != "system"]
+        self.assertEqual(texts, ["новое"])
+
 
 class OsPromptTests(unittest.TestCase):
     def test_windows_and_linux_lines_are_kept(self) -> None:
@@ -843,7 +902,9 @@ class ChatUiTests(unittest.TestCase):
         self.assertTrue(draft.strip().endswith("```"))
 
         window._activate_session("b")
-        self.assertTrue(window.chat_pane.isHidden())
+        self.assertFalse(window.chat_pane.isHidden())
+        self.assertFalse(window.chat_pane._picker.isHidden())
+        self.assertTrue(window.chat_pane._input_box.isHidden())
         window._activate_session("a")
         self.assertEqual(window.chat_pane.input_text(), draft)
 
@@ -853,11 +914,9 @@ class ChatUiTests(unittest.TestCase):
         self.assertFalse(window.chat_pane.isHidden())
 
         dialog = CreateSessionDialog(service, None)
-        index = dialog.provider_combo.findData("llm")
-        self.assertGreaterEqual(index, 0)
-        dialog.provider_combo.setCurrentIndex(index)
-        self.assertFalse(dialog._ok_button.isEnabled())
-        self.assertFalse(dialog._llm_empty.isHidden())
+        self.assertLess(dialog.provider_combo.findData("llm"), 0)
+        self.assertEqual(dialog.provider_combo.currentData(), "cmd")
+        self.assertTrue(dialog._ok_button.isEnabled())
         dialog.close()
         window.close()
         self.assertIsNotNone(QDialog)
@@ -1034,8 +1093,13 @@ class ChatUiTests(unittest.TestCase):
         QApplication.processEvents()
         self.assertGreater(pane._input.height(), pane._input_min_height())
         self.assertLessEqual(pane._input.height(), pane._input_max_height())
-        composer = pane._input.parentWidget().layout().itemAt(0).layout()
-        siblings = [composer.itemAt(i).widget() for i in range(composer.count())]
+        composer = pane._input.parentWidget().layout()
+        row = next(
+            composer.itemAt(index).layout()
+            for index in range(composer.count())
+            if composer.itemAt(index).layout() is not None
+        )
+        siblings = [row.itemAt(index).widget() for index in range(row.count())]
         self.assertIs(siblings[0], pane._input)
         self.assertIs(siblings[1], pane._send)
         pane.close()

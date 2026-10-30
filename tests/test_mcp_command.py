@@ -1146,7 +1146,7 @@ class ChatCardTests(unittest.TestCase):
         QApplication.processEvents()
         edit = pane.findChild(QPlainTextEdit, "commandCapture")
         assert edit is not None
-        self.assertFalse(edit.isEnabled())
+        self.assertTrue(edit.isReadOnly())
         self.assertIn("token=secret", edit.toPlainText())
         card = pane.findChild(QFrame, "commandRequest")
         assert card is not None
@@ -1157,7 +1157,7 @@ class ChatCardTests(unittest.TestCase):
         self.assertTrue(card_buttons["Обезличить"].isVisible())
         card_buttons["Обезличить"].click()
         QApplication.processEvents()
-        self.assertTrue(edit.isEnabled())
+        self.assertFalse(edit.isReadOnly())
         self.assertFalse(card_buttons["Обезличить"].isVisible())
         edit.setPlainText("token=\n")
         card_buttons["Отправить"].click()

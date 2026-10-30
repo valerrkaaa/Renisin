@@ -35,6 +35,7 @@ class FittedText(QTextEdit):
             self.setFont(font)
         self.setPlainText(text)
         self._fitting = False
+        self._scroll_limit = 0
         self.viewport().installEventFilter(self)
         self.setFixedHeight(self.fontMetrics().lineSpacing() + 4)
 
@@ -49,6 +50,8 @@ class FittedText(QTextEdit):
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
+            if self.verticalScrollBar().maximum() > 0:
+                return False
             return _forward_wheel(self, event)
         return super().eventFilter(obj, event)
 
@@ -71,10 +74,21 @@ class FittedText(QTextEdit):
                 self.fontMetrics().lineSpacing(),
                 math.ceil(document.size().height()) + chrome + 2,
             )
+            limit = self._scroll_limit
+            if limit and height > limit:
+                height = limit
+                self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            else:
+                self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             if self.height() != height:
                 self.setFixedHeight(int(height))
         finally:
             self._fitting = False
+
+    def set_scroll_limit(self, limit: int) -> None:
+        """Выше этого предела текст крутится внутри блока, а не растягивает ленту."""
+        self._scroll_limit = max(0, int(limit))
+        self.fit_to_width()
 
 
 def clamp_scroll_host(scroll: QScrollArea) -> None:

@@ -251,7 +251,7 @@ class ChainDialogTests(unittest.TestCase):
                 ]
 
         dialog = CreateSessionDialog(Service())  # type: ignore[arg-type]
-        self.assertEqual(dialog.provider_combo.currentData(), "llm")
+        self.assertEqual(dialog.provider_combo.currentData(), "cmd")
         dialog.show()
         QApplication.processEvents()
         chain = dialog.provider_combo.findData("ssh_over_ssh")
@@ -266,11 +266,8 @@ class ChainDialogTests(unittest.TestCase):
         self.assertEqual(dialog._hop_rows[1].title.text(), "Узел 2")
         self.assertTrue(dialog._hop_rows[0].remove_button.isVisible())
 
-        dialog.provider_combo.setCurrentIndex(dialog.provider_combo.findData("llm"))
-        terminal = dialog.terminal_combo.findData("ssh_over_ssh")
-        dialog.terminal_combo.setCurrentIndex(terminal)
+        dialog.provider_combo.setCurrentIndex(dialog.provider_combo.findData("ssh_over_ssh"))
         QApplication.processEvents()
-        self.assertTrue(dialog._llm_container.isVisible())
         self.assertTrue(dialog._chain_container.isVisible())
         self.assertFalse(dialog._ssh_container.isVisible())
         self.assertEqual(dialog._hop_rows[0].port.value(), 22)
@@ -321,9 +318,8 @@ class ChainDialogTests(unittest.TestCase):
         dialog.resize(560, 640)
         dialog.show()
         QApplication.processEvents()
-        dialog.provider_combo.setCurrentIndex(dialog.provider_combo.findData("llm"))
-        dialog.terminal_combo.setCurrentIndex(
-            dialog.terminal_combo.findData("ssh_over_ssh")
+        dialog.provider_combo.setCurrentIndex(
+            dialog.provider_combo.findData("ssh_over_ssh")
         )
         dialog.name_edit.setText("цепочка")
         dialog._add_hop.click()

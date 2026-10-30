@@ -1331,6 +1331,26 @@ class ApplicationService:
             return None
         return self._llm_profiles.get(profile_id)
 
+    def assign_llm_profile(
+        self, session_id: domain.SessionId, profile_id: domain.ProfileId
+    ) -> domain.SessionInfo:
+        """Привязать модель к сессии. Переписка в журнале не меняется."""
+        if self._llm_profiles is None or self._llm_profiles.get(profile_id) is None:
+            raise ValueError("Выбранная модель не найдена")
+        stored = self._catalog.get(session_id)
+        if stored is None:
+            raise ValueError("Сессия не найдена")
+        updated = replace(stored, llm_profile_id=profile_id)
+        self._catalog.save(updated)
+        with self._lock:
+            self._llm_problem.pop(session_id, None)
+            current = self._sessions.get(session_id)
+            if current is not None:
+                current = replace(current, llm_profile_id=profile_id)
+                self._sessions[session_id] = current
+                return current
+        return updated
+
     def save_llm_profile(self, profile: domain.LlmProfile) -> domain.LlmProfile:
         """Проверяет GET /v1/models и пишет профиль только если id есть в списке."""
         if self._llm_profiles is None or self._llm is None:
@@ -2039,6 +2059,14 @@ class ApplicationService:
         self._require_profile(session_id)
         self._append_chat(session_id, domain.EventType.CHAT_RESET, "")
 
+    def clear_chat(self, session_id: domain.SessionId) -> None:
+        """Остановить ответ и забыть переписку. Экран чата тоже начинается заново."""
+        self.cancel_chat(session_id)
+        if not self._journal.is_unlocked(session_id):
+            raise ValueError("Журнал закрыт")
+        self._require_profile(session_id)
+        self._append_chat(session_id, domain.EventType.CHAT_CLEAR, "")
+
     def _maybe_probe_os(self, session_id: domain.SessionId) -> None:
         """Первый запуск: узнать ОС, даже если у сессии нет модели."""
         info = self.get_session(session_id)
@@ -2367,7 +2395,10 @@ class ApplicationService:
     def _active_chat(self, session_id: domain.SessionId) -> List[tuple]:
         messages: List[tuple] = []
         for event in self._journal.get_by_session(session_id):
-            if event.event_type == domain.EventType.CHAT_RESET:
+            if event.event_type in (
+                domain.EventType.CHAT_RESET,
+                domain.EventType.CHAT_CLEAR,
+            ):
                 messages.clear()
             elif event.event_type == domain.EventType.CHAT_USER:
                 messages.append(("user", event.payload))

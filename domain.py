@@ -187,6 +187,8 @@ class EventType(str, Enum):
     CHAT_USER = "chat_user"
     CHAT_ASSISTANT = "chat_assistant"
     CHAT_RESET = "chat_reset"
+    # Чат на экране начинается заново, модель больше не видит переписку выше.
+    CHAT_CLEAR = "chat_clear"
     # Одна строка с ОС сессии. В старых чатах события нет — промпт без ОС.
     CHAT_OS = "chat_os"
     # Заметка человеку после карточки команды. Модели не отправляется.
