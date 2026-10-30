@@ -1277,7 +1277,13 @@ class MainWindow(QMainWindow):
                 continue
             if endpoint is None or not endpoint(info.session_id):
                 continue
-            entries.append((info.mcp_alias.strip() or info.name, info.mcp_description))
+            entries.append(
+                (
+                    info.mcp_alias.strip() or info.name,
+                    info.mcp_description,
+                    endpoint(info.session_id),
+                )
+            )
         self._lounge.set_mcp_entries(entries)
 
     def _update_header(self) -> None:

@@ -1156,6 +1156,7 @@ class ChatCardTests(unittest.TestCase):
         card_buttons["Обезличить"].click()
         QApplication.processEvents()
         self.assertTrue(edit.isEnabled())
+        self.assertFalse(card_buttons["Обезличить"].isVisible())
         edit.setPlainText("token=\n")
         card_buttons["Отправить"].click()
         self.assertEqual(delivered[0][0], "id-1")

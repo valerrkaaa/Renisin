@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QTextCharFormat
+from PySide6.QtGui import QFont, QGuiApplication, QTextCharFormat
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -37,6 +37,18 @@ from ui.command_input import GrowingText
 
 GENERAL_CHAT_ID = "general-ai-chat"
 GENERAL_CHAT_TITLE = "общий чат для ИИ"
+
+
+def mcp_json_fragment(entries: List[Tuple[str, str]]) -> str:
+    """Фрагмент объекта mcp.json по уже поднятым серверам."""
+    blocks = []
+    for name, url in entries:
+        blocks.append(
+            f"{json.dumps(name, ensure_ascii=False)}: {{\n"
+            f'"url": {json.dumps(url, ensure_ascii=False)}\n'
+            "},"
+        )
+    return "\n".join(blocks)
 
 _THINKING = ("Думает", "Думает.", "Думает..", "Думает...")
 
@@ -104,18 +116,25 @@ class GeneralChatPage(QWidget):
         if self._tabs and not self._tabs[self._current].model_id:
             self._fill_model_combo()
 
-    def set_mcp_entries(self, entries: List[Tuple[str, str]]) -> None:
-        """Имя для списка и описание, которое видно при наведении."""
+    def set_mcp_entries(self, entries: List[Tuple[str, ...]]) -> None:
+        """Имя для списка, описание при наведении и адрес для mcp.json."""
         self._mcp_list.clear()
+        self._mcp_targets = []
         if not entries:
             item = QListWidgetItem("Нет поднятых MCP")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._mcp_list.addItem(item)
             return
-        for alias, description in entries:
+        for row in entries:
+            alias = row[0]
+            description = row[1] if len(row) > 1 else ""
+            url = row[2] if len(row) > 2 else ""
             item = QListWidgetItem(alias)
             item.setToolTip(description.strip())
+            item.setData(Qt.ItemDataRole.UserRole, url)
             self._mcp_list.addItem(item)
+            if str(url).strip():
+                self._mcp_targets.append((alias, str(url)))
 
     def append_mcp_cite(self, name: str) -> None:
         """Короткая цитата MCP в конец черновика. В модель уйдёт имя и описание."""
@@ -299,7 +318,16 @@ class GeneralChatPage(QWidget):
         self._mcp_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._mcp_list.itemDoubleClicked.connect(self._cite_mcp)
         layout.addWidget(self._mcp_list, 1)
+        self._mcp_targets: List[Tuple[str, str]] = []
+        copy = QPushButton("скопировать для mcp.json")
+        copy.setObjectName("copyMcpJson")
+        copy.setToolTip("Скопировать адреса поднятых MCP для вставки в mcp.json")
+        copy.clicked.connect(self._copy_mcp_json)
+        layout.addWidget(copy)
         return rail
+
+    def _copy_mcp_json(self) -> None:
+        QGuiApplication.clipboard().setText(mcp_json_fragment(self._mcp_targets))
 
     def _render_tabs(self) -> None:
         while self._tab_bar.count():

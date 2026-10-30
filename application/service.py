@@ -2139,10 +2139,16 @@ class ApplicationService:
             return self._llm_problem.get(lounge_origin(tab_id), "")
 
     def lounge_mcp_entries(self) -> List[tuple]:
-        """Имя и описание MCP, которые сейчас подключены."""
+        """Имя, описание и адрес MCP, которые сейчас подключены."""
         entries = []
         for info in self._lounge_targets():
-            entries.append((info.mcp_alias.strip() or info.name, info.mcp_description))
+            entries.append(
+                (
+                    info.mcp_alias.strip() or info.name,
+                    info.mcp_description,
+                    self.mcp_endpoint(info.session_id),
+                )
+            )
         return entries
 
     def open_lounge_tab(self) -> domain.LoungeTab:

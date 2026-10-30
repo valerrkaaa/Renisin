@@ -507,6 +507,7 @@ class _CommandRequest(QFrame):
         self._editable = True
         self._output.setEnabled(True)
         self._output.setFocus()
+        self._review_buttons[1].hide()
 
     def _send_output(self) -> None:
         text = self._output.toPlainText()

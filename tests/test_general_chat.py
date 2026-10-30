@@ -151,6 +151,27 @@ class GeneralChatTests(unittest.TestCase):
         self.assertEqual(page.input_text(), "«MCP: консоль»")
         self.assertEqual(page._mcp_list.item(0).text(), "консоль")
         self.assertEqual(page._mcp_list.item(0).toolTip(), "основной терминал")
+        page.set_mcp_entries(
+            [
+                ("консоль", "основной терминал", "http://127.0.0.1:9/mcp/a"),
+                ('сервер "б"', "второй", "http://127.0.0.1:9/mcp/b"),
+            ]
+        )
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QPushButton
+
+        copy = page.findChild(QPushButton, "copyMcpJson")
+        assert copy is not None
+        copy.click()
+        self.assertEqual(
+            QGuiApplication.clipboard().text(),
+            '"консоль": {\n'
+            '"url": "http://127.0.0.1:9/mcp/a"\n'
+            "},\n"
+            '"сервер \\"б\\"": {\n'
+            '"url": "http://127.0.0.1:9/mcp/b"\n'
+            "},",
+        )
         self.assertEqual(len(page.findChildren(QFrame, "loungeRule")), 2)
         page.set_messages(
             page.current_tab_id(),
