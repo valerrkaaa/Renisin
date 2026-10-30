@@ -148,6 +148,14 @@ class ServiceKeyTests(unittest.TestCase):
             service.reset_master_password()
             self.assertFalse(service.has_master_password())
             self.assertTrue(service.opens_with_master_passphrase(info))
+            cmd = domain.SessionInfo(
+                session_id="c",
+                name="console",
+                provider=domain.ProviderType.CMD,
+                identity=domain.ExecutionIdentityType.CURRENT_USER,
+                status=domain.SessionStatus.CLOSED,
+            )
+            self.assertTrue(service.opens_with_master_passphrase(cmd))
             self.assertTrue(service.needs_master_password(info))
             self.assertTrue(service.needs_master_password(info, reconnect=True))
             service.set_master_password("one", "one")

@@ -262,7 +262,7 @@ class NewSessionRequest:
 
 
 class MasterPasswordDialog(QDialog):
-    """Первый мастер-пароль за запуск. Два поля сравниваются по хешу."""
+    """Первый мастер-пароль за запуск. Остаётся только в памяти."""
 
     def __init__(
         self,
@@ -273,7 +273,7 @@ class MasterPasswordDialog(QDialog):
         self._service = service
         self.setWindowTitle("Мастер-пароль")
         self.setModal(True)
-        self.resize(460, 240)
+        self.resize(460, 200)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 10)
@@ -291,10 +291,6 @@ class MasterPasswordDialog(QDialog):
         self._password.setEchoMode(QLineEdit.EchoMode.Password)
         self._password.returnPressed.connect(self._on_ok)
         form.addRow("Мастер-пароль", self._password)
-        self._confirm = QLineEdit()
-        self._confirm.setEchoMode(QLineEdit.EchoMode.Password)
-        self._confirm.returnPressed.connect(self._on_ok)
-        form.addRow("Подтверждение", self._confirm)
         layout.addLayout(form)
 
         self._error = QLabel("")
@@ -314,16 +310,14 @@ class MasterPasswordDialog(QDialog):
         return self._service.master_password()
 
     def _on_ok(self) -> None:
+        password = self._password.text()
         try:
-            self._service.set_master_password(
-                self._password.text(), self._confirm.text()
-            )
+            self._service.set_master_password(password, password)
         except ValueError as exc:
             self._error.setText(str(exc))
             self._error.setVisible(True)
             return
         self._password.clear()
-        self._confirm.clear()
         self.accept()
 
 

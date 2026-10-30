@@ -372,10 +372,8 @@ class PromptUiTests(unittest.TestCase):
         self.assertEqual(window.paste_run_button.text(), "")
         row = window.paste_button.parentWidget().layout()
         widgets = [row.itemAt(i).widget() for i in range(row.count())]
-        prompt = next(w for w in widgets if w.objectName() == "inputPrompt")
         self.assertLess(widgets.index(window.paste_button), widgets.index(window.paste_run_button))
-        self.assertLess(widgets.index(window.paste_run_button), widgets.index(prompt))
-        self.assertLess(widgets.index(prompt), widgets.index(window.input))
+        self.assertLess(widgets.index(window.paste_run_button), widgets.index(window.input))
         self.assertFalse(window._settings_button.isHidden())
         self.assertEqual(window._settings_button.toolTip(), "Настройки сессии")
         window.close()

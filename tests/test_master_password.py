@@ -96,15 +96,8 @@ class JournalPasswordTests(unittest.TestCase):
         dialog.show()
         app.processEvents()
         dialog._password.setText("alpha")
-        dialog._confirm.setText("beta")
         dialog._on_ok()
         app.processEvents()
-        self.assertTrue(dialog._error.isVisible())
-        self.assertIn("не совпадают", dialog._error.text())
-        self.assertFalse(service.has_master_password())
-
-        dialog._confirm.setText("alpha")
-        dialog._on_ok()
         self.assertFalse(dialog.isVisible())
         self.assertEqual(service.master_password(), "alpha")
         self.assertEqual(

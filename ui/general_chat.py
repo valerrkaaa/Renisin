@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QGuiApplication, QTextCharFormat
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from ui.chat_pane import _CommandRequest, _SelectableText
 from ui.command_card import CommandCard
+from ui.fitted_text import FittedText, clamp_scroll_host
 from ui.command_input import GrowingText
 
 GENERAL_CHAT_ID = "general-ai-chat"
@@ -255,6 +256,7 @@ class GeneralChatPage(QWidget):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._transcript_host = QWidget()
         self._transcript = QVBoxLayout(self._transcript_host)
@@ -262,6 +264,7 @@ class GeneralChatPage(QWidget):
         self._transcript.setSpacing(10)
         self._transcript.addStretch(1)
         scroll.setWidget(self._transcript_host)
+        scroll.viewport().installEventFilter(self)
         self._transcript_scroll = scroll
         layout.addWidget(scroll, 1)
 
@@ -274,7 +277,7 @@ class GeneralChatPage(QWidget):
         box = QFrame()
         box.setObjectName("inputPanel")
         row = QHBoxLayout(box)
-        row.setContentsMargins(12, 8, 10, 8)
+        row.setContentsMargins(8, 4, 8, 4)
         row.setSpacing(8)
         self._draft = GrowingText()
         self._draft.setObjectName("loungeDraft")
@@ -329,12 +332,22 @@ class GeneralChatPage(QWidget):
     def _copy_mcp_json(self) -> None:
         QGuiApplication.clipboard().setText(mcp_json_fragment(self._mcp_targets))
 
+    def add_tool(self, widget: QWidget) -> None:
+        """Кнопка слева от вкладок. Перерисовка вкладок её не удаляет."""
+        widget.setProperty("pinned", "true")
+        self._tab_bar.insertWidget(0, widget)
+
     def _render_tabs(self) -> None:
+        pinned: List[QWidget] = []
         while self._tab_bar.count():
             item = self._tab_bar.takeAt(0)
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and widget.property("pinned") == "true":
+                pinned.append(widget)
+            elif widget is not None:
                 widget.deleteLater()
+        for widget in pinned:
+            self._tab_bar.addWidget(widget)
         for index, tab in enumerate(self._tabs):
             button = QPushButton(tab.title)
             button.setObjectName("chatTab")
@@ -460,6 +473,16 @@ class GeneralChatPage(QWidget):
             if card.is_live():
                 return card
         return None
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        scroll = getattr(self, "_transcript_scroll", None)
+        if (
+            scroll is not None
+            and obj is scroll.viewport()
+            and event.type() == QEvent.Type.Resize
+        ):
+            clamp_scroll_host(scroll)
+        return super().eventFilter(obj, event)
 
     def _render_messages(self) -> None:
         tab = self._tabs[self._current]
@@ -614,10 +637,8 @@ class GeneralChatPage(QWidget):
 
     def _bubble(self, role: str, text: str) -> QWidget:
         if role == "result":
-            label = QLabel(text)
+            label = FittedText(text)
             label.setObjectName("toolOutcome")
-            label.setWordWrap(True)
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             return label
         row = QWidget()
         layout = QHBoxLayout(row)

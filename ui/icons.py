@@ -73,6 +73,51 @@ def gear_icon() -> QIcon:
     return _pixmap(draw)
 
 
+def plus_icon() -> QIcon:
+    """Плюс: новая сессия."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawLine(16, 8, 16, 24)
+        painter.drawLine(8, 16, 24, 16)
+
+    return _pixmap(draw)
+
+
+def folder_icon() -> QIcon:
+    """Папка: новая группа."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawRoundedRect(7, 12, 18, 12, 2, 2)
+        painter.drawLine(7, 14, 13, 14)
+        painter.drawLine(13, 14, 15, 11)
+        painter.drawLine(15, 11, 24, 11)
+
+    return _pixmap(draw)
+
+
+def sidebar_icon(side: str) -> QIcon:
+    """Рамка окна с полосой слева или справа, как переключатель панели."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawRoundedRect(6, 7, 20, 18, 2, 2)
+        if side == "right":
+            painter.drawLine(19, 8, 19, 24)
+        else:
+            painter.drawLine(13, 8, 13, 24)
+
+    return _pixmap(draw)
+
+
+def close_icon() -> QIcon:
+    """Крестик: закрыть сессию."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawLine(11, 11, 21, 21)
+        painter.drawLine(21, 11, 11, 21)
+
+    return _pixmap(draw)
+
+
 def pencil_icon() -> QIcon:
     """Карандаш."""
 

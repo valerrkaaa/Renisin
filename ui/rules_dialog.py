@@ -28,7 +28,6 @@ from application.command_rules import try_match
 _FAMILIES = (
     (domain.SHELL_UNIX, "linux/macOS"),
     (domain.SHELL_WINDOWS, "windows"),
-    (domain.SHELL_OTHER, "other"),
 )
 
 
@@ -192,9 +191,18 @@ class RulesDialog(QWidget):
         layout = QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(6)
         label = QLabel(title)
         label.setObjectName("sidebarTitle")
-        layout.addWidget(label)
+        head.addWidget(label, 1)
+        add = QPushButton("+")
+        add.setObjectName("toolButton")
+        add.setFixedSize(22, 22)
+        add.setToolTip("Добавить шаблон")
+        add.clicked.connect(lambda: self._on_add(family))
+        head.addWidget(add)
+        layout.addLayout(head)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -207,12 +215,6 @@ class RulesDialog(QWidget):
         scroll.setWidget(body)
         layout.addWidget(scroll, 1)
         self._lists[family] = body_layout
-
-        add = QPushButton("+")
-        add.setObjectName("auxButton")
-        add.setToolTip("Добавить шаблон")
-        add.clicked.connect(lambda: self._on_add(family))
-        layout.addWidget(add, 0, Qt.AlignmentFlag.AlignLeft)
         return host
 
     def _reload(self) -> None:

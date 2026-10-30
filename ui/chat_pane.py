@@ -9,8 +9,8 @@ import math
 import re
 from typing import List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QTextCharFormat
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextOption
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -27,6 +27,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ui.command_input import five_line_height, one_line_height
+from ui.fitted_text import FittedText, clamp_scroll_host
 
 _FENCE = re.compile(r"```([^\n`]*)\r?\n(.*?)```", re.DOTALL)
 _SHELL_LANGS = frozenset(
@@ -48,12 +51,20 @@ class _SelectableText(QTextEdit):
     ) -> None:
         super().__init__()
         self.setReadOnly(True)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         self.setObjectName(name)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(0)
+        option = self.document().defaultTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDefaultTextOption(option)
         self.setPlainText(text)
         if margin is None:
             if name in ("chatUser", "chatAssistant"):
@@ -80,6 +91,12 @@ class _SelectableText(QTextEdit):
 
     def text(self) -> str:
         return self.toPlainText()
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(0, self.fontMetrics().lineSpacing())
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(0, max(self.fontMetrics().lineSpacing(), self.height()))
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
@@ -246,11 +263,20 @@ class _CommandText(QTextEdit):
         super().__init__()
         self.setObjectName("shellCodeRich")
         self.setReadOnly(True)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFont(mono)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(0)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        option = self.document().defaultTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDefaultTextOption(option)
         self.document().setDocumentMargin(0)
         self.viewport().setAutoFillBackground(False)
         self._fitting = False
@@ -274,6 +300,12 @@ class _CommandText(QTextEdit):
                 )
         cursor.endEditBlock()
         self._fit()
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(0, self.fontMetrics().lineSpacing())
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(0, max(self.fontMetrics().lineSpacing(), self.height()))
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -330,7 +362,10 @@ class _CommandRequest(QFrame):
         why = QLabel(f"{intent}")
         why.setObjectName("commandIntent")
         why.setWordWrap(True)
-        why.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        why.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         layout.addWidget(why)
         self._mono = mono
         self._code = self._make_preview(parts, spans)
@@ -446,12 +481,8 @@ class _CommandRequest(QFrame):
     def _make_preview(self, parts: Tuple[str, ...], spans: Sequence[Sequence[object]]) -> QWidget:
         rich = command_rich_text(self._command, parts, spans)
         if rich is None:
-            code = QLabel(command_caption(self._command, parts))
+            code = FittedText(command_caption(self._command, parts), self._mono)
             code.setObjectName("shellCode")
-            code.setFont(self._mono)
-            code.setWordWrap(True)
-            code.setTextFormat(Qt.TextFormat.PlainText)
-            code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             return code
         return _CommandText(self._mono, parts, spans)
 
@@ -568,25 +599,24 @@ class ChatPane(QWidget):
             "Если выключено, ответ уходит сразу."
         )
         head.addWidget(self._review_output)
-        self._context = QLabel("")
-        self._context.setObjectName("chatContext")
-        head.addWidget(self._context)
-        self._slash = QLabel("/")
-        self._slash.setObjectName("chatContext")
-        self._slash.setVisible(False)
-        head.addWidget(self._slash)
+        self._usage_tokens = 0
+        self._usage_messages = 0
+        self._usage = QPushButton("лимит")
+        self._usage.setObjectName("usageButton")
+        self._usage.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._usage.setToolTip(
+            "Сколько токенов из лимита уйдёт в модель.\n"
+            "Нажмите, чтобы задать лимит или сбросить контекст."
+        )
+        self._usage.clicked.connect(self._open_limit)
+        head.addWidget(self._usage)
         self._limit = QSpinBox()
         self._limit.setObjectName("chatLimit")
         self._limit.setRange(256, 1_000_000)
         self._limit.setSingleStep(1024)
         self._limit.setValue(8192)
-        self._limit.setVisible(False)
-        self._limit.setToolTip(
-            "Лимит контекста. Слева — оценка того, сколько уже уйдёт в модель."
-        )
+        self._limit.setToolTip("Лимит контекста в токенах.")
         self._limit.valueChanged.connect(self._on_limit_changed)
-        head.addWidget(self._limit)
-        self._usage_messages = 0
         self._reset = QPushButton("Сбросить")
         self._reset.setObjectName("auxButton")
         self._reset.setToolTip(
@@ -594,7 +624,17 @@ class ChatPane(QWidget):
             "Сообщения останутся в чате, в запрос они больше не попадут."
         )
         self._reset.clicked.connect(self.reset_requested.emit)
-        head.addWidget(self._reset)
+        self._reset.clicked.connect(self._hide_limit)
+        self._limit_popup = QFrame(self, Qt.WindowType.Popup)
+        self._limit_popup.setObjectName("limitPopup")
+        popup_layout = QVBoxLayout(self._limit_popup)
+        popup_layout.setContentsMargins(10, 10, 10, 10)
+        popup_layout.setSpacing(8)
+        caption = QLabel("Лимит токенов")
+        caption.setObjectName("chatContext")
+        popup_layout.addWidget(caption)
+        popup_layout.addWidget(self._limit)
+        popup_layout.addWidget(self._reset)
         root.addLayout(head)
 
         self._banner = QFrame()
@@ -623,6 +663,7 @@ class ChatPane(QWidget):
         scroll = QScrollArea()
         scroll.setObjectName("historyScroll")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._messages_host = QWidget()
         self._messages_host.setObjectName("historyHost")
@@ -642,27 +683,27 @@ class ChatPane(QWidget):
         box = QFrame()
         box.setObjectName("inputPanel")
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(8, 6, 8, 6)
+        box_layout.setContentsMargins(8, 4, 8, 4)
         box_layout.setSpacing(0)
         self._input = QTextEdit()
         self._input.setObjectName("chatInput")
         self._input.setFont(mono)
         self._mono = mono
-        self._input.setPlaceholderText(
-            "Сообщение модели. Enter — отправить, Ctrl+Enter или Shift+Enter — новая строка."
-        )
+        self._input.setPlaceholderText("Промпт... Enter - отправить, Ctrl+Enter или Shift+Enter- новая строка")
         self._input.document().setDocumentMargin(2)
         self._input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._input.setFixedHeight(self._input_min_height())
         self._input.textChanged.connect(self._fit_input)
         self._input.installEventFilter(self)
         self._send = QPushButton("Отправить")
         self._send.setObjectName("sendButton")
+        self._send.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self._send.clicked.connect(self._on_primary_click)
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(self._input, 1)
-        row.addWidget(self._send, 0, Qt.AlignmentFlag.AlignBottom)
+        row.addWidget(self._send, 0)
         box_layout.addLayout(row)
         root.addWidget(box)
 
@@ -677,6 +718,7 @@ class ChatPane(QWidget):
     def eventFilter(self, obj, event):  # type: ignore[override]
         scroll = getattr(self, "_scroll", None)
         if scroll is not None and obj is scroll.viewport() and event.type() == QEvent.Type.Resize:
+            clamp_scroll_host(scroll)
             self._fit_bubbles()
             return False
         field = getattr(self, "_input", None)
@@ -744,46 +786,52 @@ class ChatPane(QWidget):
         return self._review_output.isChecked()
 
     def set_context(self, text: str) -> None:
-        self._context.setText(text)
-        self._context.setVisible(bool(text))
-        self._context.setProperty("over", "false")
-        self._context.style().unpolish(self._context)
-        self._context.style().polish(self._context)
-        self._slash.setVisible(False)
-        self._limit.setVisible(False)
+        self._usage_tokens = 0
+        self._show_usage(text, over=False)
 
     def set_usage(self, tokens: int, messages: int, limit: int) -> None:
         """Счётчик занятого контекста: потрачено / лимит."""
         self._usage_messages = messages
-        if limit <= 0:
-            if messages:
-                self.set_context(f"~{tokens} ток. · {messages} сообщ.")
-            else:
-                self.set_context("")
+        self._usage_tokens = tokens
+        if limit > 0:
+            self._limit.blockSignals(True)
+            self._limit.setValue(limit)
+            self._limit.blockSignals(False)
+            self._show_usage(f"{tokens} / {limit}", tokens > limit)
+            self._usage.setToolTip(
+                f"{messages} сообщ. в запросе к модели.\n"
+                "Нажмите, чтобы задать лимит или сбросить контекст."
+            )
             return
-        self._limit.blockSignals(True)
-        self._limit.setValue(limit)
-        self._limit.blockSignals(False)
-        self._limit.setVisible(True)
-        self._slash.setVisible(True)
-        self._context.setText(str(tokens))
-        self._context.setVisible(True)
-        self._context.setToolTip(
-            f"{messages} сообщ. в запросе к модели. Поле справа — лимит."
-        )
-        self._context.setProperty("over", "true" if tokens > limit else "false")
-        self._context.style().unpolish(self._context)
-        self._context.style().polish(self._context)
+        if messages:
+            self._show_usage(f"~{tokens}", over=False)
+        else:
+            self._show_usage("лимит", over=False)
+
+    def _show_usage(self, text: str, over: bool) -> None:
+        self._usage.setText(text or "лимит")
+        self._usage.setVisible(True)
+        self._usage.setProperty("over", "true" if over else "false")
+        self._usage.style().unpolish(self._usage)
+        self._usage.style().polish(self._usage)
+
+    def _open_limit(self) -> None:
+        popup = self._limit_popup
+        popup.adjustSize()
+        origin = self._usage.mapToGlobal(QPoint(0, self._usage.height() + 4))
+        popup.move(origin)
+        popup.show()
+        self._limit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._limit.selectAll()
+
+    def _hide_limit(self) -> None:
+        self._limit_popup.hide()
 
     def _on_limit_changed(self, value: int) -> None:
-        tokens = 0
-        try:
-            tokens = int(self._context.text())
-        except ValueError:
-            tokens = 0
-        self._context.setProperty("over", "true" if tokens > value else "false")
-        self._context.style().unpolish(self._context)
-        self._context.style().polish(self._context)
+        self._show_usage(
+            f"{self._usage_tokens} / {value}",
+            self._usage_tokens > value,
+        )
         self.limit_changed.emit(value)
 
     def show_command_request(
@@ -913,10 +961,16 @@ class ChatPane(QWidget):
             widget.deleteLater()
 
     def _input_min_height(self) -> int:
-        return 36
+        field = getattr(self, "_input", None)
+        if field is None:
+            return 28
+        return one_line_height(field)
 
     def _input_max_height(self) -> int:
-        return 180
+        field = getattr(self, "_input", None)
+        if field is None:
+            return 36 + 16 * 4
+        return five_line_height(field)
 
     def _fit_input(self) -> None:
         field = getattr(self, "_input", None)
@@ -925,20 +979,31 @@ class ChatPane(QWidget):
         width = field.viewport().width()
         if width < 20:
             return
-        document = field.document()
-        document.setTextWidth(width)
-        height = int(document.size().height()) + 8
-        height = max(self._input_min_height(), min(self._input_max_height(), height))
+        base = one_line_height(field)
+        if not field.toPlainText():
+            height = base
+        else:
+            document = field.document()
+            document.setTextWidth(width)
+            margins = field.contentsMargins()
+            height = int(
+                document.size().height()
+                + margins.top()
+                + margins.bottom()
+                + field.frameWidth() * 2
+            )
+            height = max(base, min(self._input_max_height(), height))
         if field.height() != height:
             field.setFixedHeight(height)
+        button = getattr(self, "_send", None)
+        if button is not None and button.height() != height:
+            button.setFixedHeight(height)
 
     def _append(self, role: str, text: str) -> QWidget:
         shown = text.strip("\n")
         if role == "result":
-            widget = QLabel(shown)
+            widget = FittedText(shown)
             widget.setObjectName("toolOutcome")
-            widget.setWordWrap(True)
-            widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
             self._insert_message(widget)
             return widget

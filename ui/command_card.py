@@ -8,20 +8,23 @@ import math
 from typing import Optional
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QFont, QFontMetrics, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from ui.fitted_text import FittedText
 from ui.terminal_view import TerminalView
 
 
@@ -61,28 +64,39 @@ class CommandCard(QFrame):
         layout.setSpacing(8)
 
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(2)
+        header.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         icon = QLabel("❯")
         icon.setObjectName("commandIcon")
         icon.setFont(mono)
-        header.addWidget(icon)
+        icon.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        icon.setFixedHeight(QFontMetrics(mono).height())
+        icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        arrow = QWidget()
+        arrow.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        arrow_column = QVBoxLayout(arrow)
+        arrow_column.setContentsMargins(0, 0, 0, 0)
+        arrow_column.setSpacing(0)
+        arrow_column.addWidget(icon)
+        arrow_column.addStretch(1)
+        header.addWidget(arrow, 0, Qt.AlignmentFlag.AlignTop)
 
         if target:
             where = QLabel(f"MCP: {target}")
             where.setObjectName("commandTarget")
+            where.setMinimumWidth(0)
+            where.setMaximumWidth(180)
             header.addWidget(where, 0, Qt.AlignmentFlag.AlignTop)
 
-        self.command_label = QLabel(command)
+        command_font = QFont(mono)
+        command_font.setWeight(QFont.Weight.DemiBold)
+        self.command_label = FittedText(command, command_font)
         self.command_label.setObjectName("commandText")
-        self.command_label.setFont(mono)
-        self.command_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.command_label.setWordWrap(True)
-        header.addWidget(self.command_label, 1)
+        header.addWidget(self.command_label, 1, Qt.AlignmentFlag.AlignTop)
 
         self.attach_button = QPushButton(">")
+        self.attach_button.setFixedSize(22, 22)
         self.attach_button.setObjectName("attachButton")
         self.attach_button.setToolTip(
             "Добавить команду и её вывод\nв конец поля чата. Сообщение не отправляется."
@@ -91,22 +105,18 @@ class CommandCard(QFrame):
         self.attach_button.clicked.connect(lambda: self.attach_requested.emit(self))
         header.addWidget(self.attach_button, 0, Qt.AlignmentFlag.AlignTop)
 
-        self.resend_button = QPushButton("↻  Повторить")
+        self.resend_button = QPushButton("↻")
         self.resend_button.setObjectName("resendButton")
+        self.resend_button.setFixedSize(22, 22)
         self.resend_button.setToolTip("Вставить команду в поле ввода и выполнить снова")
         self.resend_button.clicked.connect(
             lambda: self.resend_requested.emit(self)
         )
         header.addWidget(self.resend_button, 0, Qt.AlignmentFlag.AlignTop)
 
-        self.copy_button = QPushButton("⧉  Скопировать")
-        self.copy_button.setObjectName("copyButton")
-        self.copy_button.setToolTip("Скопировать команду и весь вывод")
-        self.copy_button.clicked.connect(self.copy_to_clipboard)
-        header.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignTop)
-
-        self.delete_button = QPushButton("✕")
+        self.delete_button = QPushButton("×")
         self.delete_button.setObjectName("deleteButton")
+        self.delete_button.setFixedSize(22, 22)
         self.delete_button.setToolTip("Удалить этот блок из истории")
         self.delete_button.clicked.connect(
             lambda: self.remove_requested.emit(self)
@@ -125,6 +135,10 @@ class CommandCard(QFrame):
         self.output = QTextEdit()
         self.output.setObjectName("commandOutput")
         self.output.setReadOnly(True)
+        self.output.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         self.output.setAcceptRichText(False)
         self.output.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.output.setFont(mono)
@@ -135,14 +149,18 @@ class CommandCard(QFrame):
         self.output.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        self.output.setMinimumWidth(0)
         self.output.setMinimumHeight(0)
         self.output.document().setDocumentMargin(0)
         self.output.setVisible(False)
         self.output.installEventFilter(self)
         self.output.viewport().installEventFilter(self)
+        self.command_label.installEventFilter(self)
+        self.command_label.viewport().installEventFilter(self)
         layout.addWidget(self.output)
 
         self.terminal = TerminalView(mono)
+        self.terminal.setObjectName("liveTerminal")
         self.terminal.setVisible(False)
         self.terminal.input_generated.connect(self.input_generated)
         self.terminal.resized.connect(self.resized)
@@ -316,6 +334,14 @@ class CommandCard(QFrame):
         self.output.verticalScrollBar().setValue(0)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if event.type() == QEvent.Type.ContextMenu and obj in (
+            self.output,
+            self.output.viewport(),
+            self.command_label,
+            self.command_label.viewport(),
+        ):
+            self._copy_menu(event.globalPos())
+            return True
         if obj is self.output.viewport() and event.type() == QEvent.Type.Wheel:
             return _forward_wheel(self.output, event)
         if obj is self.output and event.type() == QEvent.Type.Resize:
@@ -349,20 +375,29 @@ class CommandCard(QFrame):
             body += "\n" + output
         return wrap_block("terminal", body)
 
-    def copy_to_clipboard(self) -> None:
+    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
+        self._copy_menu(event.globalPos())
+        event.accept()
+
+    def copy_command(self) -> None:
+        QApplication.clipboard().setText(self.command)
+
+    def copy_output(self) -> None:
+        QApplication.clipboard().setText(self.output_text())
+
+    def copy_both(self) -> None:
         output_text = self.output_text()
         text = self.command
         if output_text:
             text += "\n" + output_text
         QApplication.clipboard().setText(text)
 
-        self.copy_button.setText("✓  Скопировано")
-        self.copy_button.setEnabled(False)
-        QTimer.singleShot(1200, self._restore_copy_button)
-
-    def _restore_copy_button(self) -> None:
-        self.copy_button.setText("⧉  Скопировать")
-        self.copy_button.setEnabled(True)
+    def _copy_menu(self, global_pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Скопировать команду", self.copy_command)
+        menu.addAction("Скопировать ответ", self.copy_output)
+        menu.addAction("Скопировать оба", self.copy_both)
+        menu.exec(global_pos)
 
 
 def _forward_wheel(widget: QWidget, event) -> bool:

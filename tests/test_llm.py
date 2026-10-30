@@ -821,7 +821,7 @@ class ChatUiTests(unittest.TestCase):
 
         service = FakeService()
         window = MainWindow(service)
-        self.assertEqual(window.settings_button.text(), "Настройки")
+        self.assertIn("Настройки", window.settings_button.toolTip())
         self.assertFalse(hasattr(window, "models_button"))
         self.assertFalse(hasattr(window, "rules_button"))
         window._activate_session("a")

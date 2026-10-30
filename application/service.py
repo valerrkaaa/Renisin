@@ -630,7 +630,9 @@ class ApplicationService:
         return bool(settings.passphrase_is_master())
 
     def opens_with_master_passphrase(self, info: domain.SessionInfo) -> bool:
-        """Вход по ключу или агенту: окно сессии не нужно, хватает мастер-пароля."""
+        """Окно сессии не нужно, если вводить нечего: консоль, ключ или агент."""
+        if info.provider == domain.ProviderType.CMD:
+            return True
         if info.provider not in (
             domain.ProviderType.SSH,
             domain.ProviderType.SSH_OVER_SSH,

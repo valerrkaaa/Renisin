@@ -18,6 +18,34 @@ from PySide6.QtWidgets import QPlainTextEdit, QSizePolicy
 _Delimiter = Tuple[str, bool]
 
 
+def one_line_height(widget) -> int:
+    """Высота ровно одной строки вместе с полями документа и рамкой."""
+    metrics = widget.fontMetrics()
+    margins = widget.contentsMargins()
+    document = getattr(widget, "document", None)
+    margin = int(document().documentMargin()) if callable(document) else 0
+    return int(
+        metrics.lineSpacing()
+        + margin * 2
+        + margins.top()
+        + margins.bottom()
+        + widget.frameWidth() * 2
+    )
+
+
+def five_line_height(widget) -> int:
+    """Высота пяти строк плюс рамка. Дальше в поле появляется прокрутка."""
+    metrics = widget.fontMetrics()
+    margins = widget.contentsMargins()
+    return int(
+        metrics.lineSpacing() * 5
+        + margins.top()
+        + margins.bottom()
+        + widget.frameWidth() * 2
+        + 6
+    )
+
+
 def command_needs_more(text: str) -> bool:
     """Команда ещё не собрана: незакрытый heredoc, кавычка или \\ в конце."""
     if not text:
@@ -116,8 +144,7 @@ class CommandInput(QPlainTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.document().setDocumentMargin(2)
-        self._min_height = 34
-        self._max_height = 180
+        self._min_height = one_line_height(self)
         self.setFixedHeight(self._min_height)
         self.textChanged.connect(self._fit_height)
 
@@ -149,10 +176,12 @@ class CommandInput(QPlainTextEdit):
         self._fit_height()
 
     def _fit_height(self) -> None:
-        document = self.document()
-        document.setTextWidth(max(1, self.viewport().width()))
-        height = int(document.size().height()) + 8
-        height = max(self._min_height, min(self._max_height, height))
+        lines = self.document().documentLayout().documentSize().height()
+        if lines < 1:
+            lines = 1
+        self._min_height = one_line_height(self)
+        height = self._min_height + int((math.ceil(lines) - 1) * self.fontMetrics().lineSpacing())
+        height = min(five_line_height(self), height)
         if self.height() != height:
             self.setFixedHeight(height)
 
@@ -165,7 +194,6 @@ class GrowingText(QPlainTextEdit):
     def __init__(self) -> None:
         super().__init__()
         self._min_height = 36
-        self._max_height = 180
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -210,6 +238,6 @@ class GrowingText(QPlainTextEdit):
         content = math.ceil(lines * self.fontMetrics().lineSpacing())
         margins = self.contentsMargins()
         height = int(content + margins.top() + margins.bottom() + self.frameWidth() * 2)
-        height = max(self._min_height, min(self._max_height, height))
+        height = max(self._min_height, min(five_line_height(self), height))
         if self.height() != height:
             self.setFixedHeight(height)

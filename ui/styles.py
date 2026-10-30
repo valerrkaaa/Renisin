@@ -62,12 +62,15 @@ class VibeStyle(QProxyStyle):
     def _draw_button_focus(painter: QPainter, widget: QPushButton) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        primary = widget.objectName() in {"primaryButton", "sendButton"} or widget.isDefault()
-        pen = QPen(QColor("#ffffff" if primary else FOCUS))
-        pen.setWidthF(2.0 if primary else 1.5)
+        primary = widget.objectName() in {"primaryButton", "sendButton", "composerSend"} or widget.isDefault()
+        if primary:
+            painter.restore()
+            return
+        pen = QPen(QColor(FOCUS))
+        pen.setWidthF(1.0)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        rect = widget.rect().adjusted(2, 2, -3, -3)
+        rect = widget.rect().adjusted(1, 1, -2, -2)
         painter.drawRoundedRect(rect, RADIUS, RADIUS)
         painter.restore()
 
@@ -117,7 +120,7 @@ def build_text_formats() -> TextFormats:
 
     return TextFormats(
         mono=mono,
-        stdout=make(TEXT),
+        stdout=make(MUTED),
         stderr=make(DANGER),
         system=make(MUTED, italic=True),
         error=make("#fdba74", italic=True),
@@ -160,9 +163,13 @@ QWidget#generalChat QLabel#chatUser,
 QWidget#generalChat QLabel#chatAssistant {{
     padding: 2px 4px;
 }}
-QLabel#toolOutcome {{
+QLabel#toolOutcome, QTextEdit#toolOutcome {{
+    background: transparent;
     color: {MUTED};
+    border: none;
     padding: 2px 2px;
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
 }}
 QLabel#loungeModel, QLabel#mcpRailTitle {{
     color: {TEXT};
@@ -185,11 +192,11 @@ QLineEdit#loungeTitleEdit, QLineEdit#loungeDraft, QComboBox#loungeModelCombo {{
     padding: 4px 8px;
 }}
 QPlainTextEdit#loungeDraft {{
-    background: {INPUT};
+    background: transparent;
     color: {TEXT};
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
-    padding: 4px 8px 4px 10px;
+    border: none;
+    border-radius: 0;
+    padding: 2px 2px;
 }}
 QPushButton#chatTab, QPushButton#chatTabAdd {{
     background: {SURFACE};
@@ -259,7 +266,8 @@ QLabel#appTitle {{
     font-weight: 600;
 }}
 QLabel#sessionLabel {{
-    color: {MUTED};
+    color: {TEXT};
+    font-weight: 600;
     padding-left: 2px;
 }}
 QLabel#statusBadge {{
@@ -290,6 +298,7 @@ QLabel#sidebarTitle {{
     color: {MUTED};
     font-size: 11px;
     font-weight: 600;
+    letter-spacing: 0.06em;
 }}
 QListWidget#sessionList, QTreeWidget#sessionList {{
     background: transparent;
@@ -334,13 +343,23 @@ QLabel#sessionName, QLabel#sessionMuted {{
 QLabel#sessionMuted {{
     color: {MUTED};
 }}
+QLabel#sessionOffline {{
+    color: {DANGER};
+}}
+QLabel#sessionRunning {{
+    color: {OK};
+}}
 QPushButton#sessionDelete {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    border-radius: 3px;
+    padding: 0;
+    font-size: 14px;
+}}
+QPushButton#sessionDelete:hover {{
     background: #3a1d22;
     color: {DANGER};
-    border: 1px solid #6b2430;
-    border-radius: {RADIUS}px;
-    padding: 2px 6px;
-    font-size: 12px;
 }}
 QPushButton#sessionFold {{
     background: transparent;
@@ -391,9 +410,26 @@ QFrame#commandCard {{
 QLabel#commandIcon, QLabel#inputPrompt {{
     color: {FOCUS};
     font-weight: 700;
+    padding: 0;
 }}
-QLabel#commandText {{
-    color: {FOCUS};
+QLabel#inputPrompt {{
+    padding-top: 4px;
+}}
+QLabel#commandText, QTextEdit#commandText, QTextEdit#commandTarget {{
+    background: transparent;
+    color: {TEXT};
+    font-weight: 600;
+    border: none;
+    padding: 0;
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
+}}
+QFrame#commandDivider {{
+    background: {BORDER};
+    border: none;
+    min-height: 1px;
+    max-height: 1px;
+    margin: 2px 8px;
 }}
 QFrame#cardSeparator {{
     color: {BORDER};
@@ -403,10 +439,10 @@ QFrame#cardSeparator {{
 }}
 QTextEdit#commandOutput {{
     background: transparent;
-    color: {TEXT};
+    color: {MUTED};
     border: none;
-    padding: 0;
-    selection-background-color: {SELECTION};
+    padding: 0 0 0 16px;
+    selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
 QFrame#inputPanel {{
@@ -420,7 +456,7 @@ QLineEdit#commandInput, QPlainTextEdit#commandInput {{
     border: none;
     selection-background-color: {SELECTION};
     selection-color: #ffffff;
-    padding: 2px 2px;
+    padding: 6px 2px;
 }}
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
     background: {INPUT};
@@ -467,28 +503,27 @@ QPushButton {{
     padding: 4px 10px;
     color: {TEXT};
 }}
-QPushButton#sendButton, QPushButton#primaryButton,
+QPushButton#sendButton, QPushButton#composerSend, QPushButton#primaryButton,
 QDialogButtonBox QPushButton:default {{
     background: {ACCENT};
     color: white;
     font-weight: 600;
     padding: 4px 12px;
 }}
-QPushButton#sendButton:hover, QPushButton#primaryButton:hover,
+QPushButton#sendButton:hover, QPushButton#composerSend:hover, QPushButton#primaryButton:hover,
 QDialogButtonBox QPushButton:default:hover {{
     background: {ACCENT_HOVER};
 }}
-QPushButton#sendButton:focus, QPushButton#primaryButton:focus,
+QPushButton#sendButton:focus, QPushButton#composerSend:focus, QPushButton#primaryButton:focus,
 QDialogButtonBox QPushButton:default:focus {{
-    background: {ACCENT_PRESS};
-    border: 2px solid #ffffff;
+    background: {ACCENT_HOVER};
     outline: none;
 }}
-QDialogButtonBox QPushButton:focus {{
-    border: 1px solid {FOCUS};
-    outline: none;
+QMessageBox QPushButton, QDialogButtonBox QPushButton {{
+    padding: 4px 14px;
+    min-width: 92px;
 }}
-QPushButton#sendButton:disabled, QPushButton#primaryButton:disabled {{
+QPushButton#sendButton:disabled, QPushButton#composerSend:disabled, QPushButton#primaryButton:disabled {{
     background: {SURFACE};
     color: {FAINT};
 }}
@@ -514,42 +549,72 @@ QPushButton#secondaryButton:disabled {{
     color: {FAINT};
     border-color: {BORDER};
 }}
-QPushButton#copyButton, QPushButton#resendButton, QPushButton#auxButton,
-QPushButton#attachButton, QPushButton#deleteButton {{
+QPushButton#auxButton {{
     background: transparent;
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS}px;
     padding: 3px 8px;
 }}
-QPushButton#copyButton:hover, QPushButton#resendButton:hover, QPushButton#auxButton:hover,
-QPushButton#attachButton:hover {{
+QPushButton#auxButton:hover {{
     background: {SELECTION};
     color: {TEXT};
     border-color: {ACCENT};
 }}
-QPushButton#copyButton:disabled {{
-    color: {OK};
-    border-color: #245c3a;
+QPushButton#resendButton,
+QPushButton#attachButton, QPushButton#deleteButton,
+QPushButton#toolButton {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    border-radius: 4px;
+    padding: 0;
+    min-width: 22px;
+    max-width: 22px;
+    min-height: 22px;
+    max-height: 22px;
+}}
+QPushButton#resendButton:hover,
+QPushButton#attachButton:hover, QPushButton#toolButton:hover {{
+    background: {SELECTION};
+    color: {TEXT};
+}}
+QPushButton#toolButton:checked {{
+    background: {SELECTION};
+    color: {TEXT};
+}}
+QPushButton#toolButton:disabled {{
+    color: {FAINT};
+    background: transparent;
+}}
+QPushButton#usageButton {{
+    background: transparent;
+    color: {MUTED};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+    padding: 2px 8px;
+    font-size: 11px;
+}}
+QPushButton#usageButton:hover {{
+    background: {SELECTION};
+    color: {TEXT};
+}}
+QPushButton#usageButton[over="true"] {{
+    color: {DANGER};
+    border-color: #6b2430;
+}}
+QFrame#limitPopup {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
 }}
 QPushButton#auxButton:disabled {{
     color: {FAINT};
     border-color: {BORDER};
 }}
-QPushButton#deleteButton {{
-    min-width: 28px;
-    max-width: 28px;
-    padding: 3px 6px;
-}}
-QPushButton#attachButton {{
-    min-width: 28px;
-    max-width: 28px;
-    padding: 3px 6px;
-}}
 QPushButton#deleteButton:hover {{
     background: #3a1d22;
     color: {DANGER};
-    border-color: #7f1d2c;
 }}
 QPushButton#iconButton {{
     background: transparent;
@@ -620,7 +685,7 @@ QLabel#chatAssistant, QTextEdit#chatAssistant, QWidget#chatAssistant {{
     border: 1px solid {BORDER};
     border-radius: {RADIUS}px;
     padding: 0;
-    selection-background-color: {SELECTION};
+    selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
 QLabel#chatPlain, QTextEdit#chatPlain {{
@@ -628,7 +693,7 @@ QLabel#chatPlain, QTextEdit#chatPlain {{
     background: transparent;
     border: none;
     padding: 0;
-    selection-background-color: {SELECTION};
+    selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
 QFrame#shellBlock {{
@@ -640,7 +705,7 @@ QTextEdit#shellCodeRich {{
     background: transparent;
     border: none;
     padding: 0;
-    selection-background-color: {SELECTION};
+    selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
 QLabel#shellCode, QTextEdit#shellCode {{
@@ -648,7 +713,7 @@ QLabel#shellCode, QTextEdit#shellCode {{
     background: transparent;
     border: none;
     padding: 0;
-    selection-background-color: {SELECTION};
+    selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
 QFrame#commandRequest {{
@@ -669,7 +734,7 @@ QLineEdit#commandReason {{
     selection-background-color: {SELECTION};
     selection-color: #ffffff;
 }}
-QLabel#mcpEndpoint, QLabel#chatContext, QLabel#chatReset, QLabel#chatThinking {{
+QLabel#mcpEndpoint, QLabel#chatContext, QLabel#chatReset, QLabel#chatThinking, QTextEdit#chatReset {{
     color: {MUTED};
     font-size: 12px;
 }}
@@ -685,18 +750,25 @@ QSpinBox#chatLimit {{
     min-width: 84px;
     max-width: 120px;
 }}
-QLabel#chatReset, QLabel#chatThinking {{
+QLabel#chatReset, QLabel#chatThinking, QTextEdit#chatReset {{
     font-style: italic;
     padding: 2px 4px;
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
 }}
 QTextEdit#chatInput {{
     background: transparent;
     color: {TEXT};
     border: none;
     border-radius: 0;
-    padding: 2px;
+    padding: 6px 2px;
     selection-background-color: {SELECTION};
     selection-color: #ffffff;
+}}
+QLabel#chatPlaceholder {{
+    color: {MUTED};
+    background: transparent;
+    padding: 0;
 }}
 QMenu {{
     background: {SURFACE};

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from application import ApplicationService
+from ui.buttons import russian_box
 from mcp_host import (
     DEFAULT_MCP_HOST,
     DEFAULT_MCP_PORTS,
@@ -58,6 +59,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs, 1)
 
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        russian_box(close)
         close.rejected.connect(self.reject)
         close.accepted.connect(self.accept)
         layout.addWidget(close)

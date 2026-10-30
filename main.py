@@ -25,6 +25,7 @@ from storage import (
     FileSshKeySettings,
 )
 from ui import MainWindow
+from ui.buttons import ButtonLocalizer
 from ui.hostkey import QtHostKeyVerifier
 from ui.ssh_prompt import QtSshPasswordPrompt
 from ui.styles import (
@@ -111,6 +112,7 @@ def main() -> int:
         )
     app = QApplication(sys.argv)
     app.setApplicationName("vterminal")
+    app.installEventFilter(ButtonLocalizer(app))
     icon = app_icon()
     app.setWindowIcon(icon)
     app.setStyle(VibeStyle("Fusion"))

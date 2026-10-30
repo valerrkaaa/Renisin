@@ -23,6 +23,7 @@ PTY_ROWS = 24
 _FG = QColor("#e4e4e7")
 _BG = QColor("#101113")
 _CURSOR = QColor("#b6b7d8")
+_FRAME = QColor("#2e2f36")
 
 _COLORS: Dict[str, str] = {
     "black": "#484f58",
@@ -237,6 +238,9 @@ class TerminalView(QWidget):
             )
             painter.setPen(QPen(_CURSOR))
             painter.drawRect(cx * cell_w, cy * cell_h, cell_w - 1, cell_h - 1)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(_FRAME))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]

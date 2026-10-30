@@ -55,6 +55,7 @@ from shell_takeover import looks_like_secret_prompt
 from ui.chat_pane import ChatPane
 from ui.command_input import CommandInput, command_needs_more
 from ui.command_card import CommandCard
+from ui.fitted_text import clamp_scroll_host
 from ui.dialogs import (
     CreateSessionDialog,
     MasterPasswordDialog,
@@ -63,7 +64,15 @@ from ui.dialogs import (
 )
 from ui.general_chat import GENERAL_CHAT_ID, GENERAL_CHAT_TITLE, GeneralChatPage
 from ui.edit_dialog import FileEditDialog
-from ui.icons import gear_icon, paste_icon, paste_run_icon
+from ui.icons import (
+    close_icon,
+    folder_icon,
+    sidebar_icon,
+    gear_icon,
+    paste_icon,
+    paste_run_icon,
+    plus_icon,
+)
 from ui.session_settings import SessionSettingsDialog
 from ui.rules_dialog import PatternDialog
 from ui.settings_dialog import SettingsDialog
@@ -82,6 +91,22 @@ def _provider_label(provider: domain.ProviderType) -> str:
     if provider == domain.ProviderType.SSH_OVER_SSH:
         return "ssh→ssh"
     return provider.value
+
+
+def _connection_kind(provider: domain.ProviderType) -> str:
+    if provider == domain.ProviderType.CMD:
+        return "local"
+    return "ssh"
+
+
+def _session_label_name(tone: str, muted: bool) -> str:
+    if tone == "offline":
+        return "sessionOffline"
+    if tone == "running":
+        return "sessionRunning"
+    if muted or tone == "closed":
+        return "sessionMuted"
+    return "sessionName"
 
 
 _NODE_MIME = "application/x-vibe-node"
@@ -208,6 +233,8 @@ class _SessionRow(QWidget):
         deletable: bool = True,
         kind: str = "session",
         depth: int = 0,
+        tone: str = "ready",
+        tip: str = "",
     ) -> None:
         super().__init__()
         self._session_id = session_id
@@ -220,18 +247,23 @@ class _SessionRow(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8 + depth * 14, 4, 6, 4)
-        layout.setSpacing(8)
+        layout.setContentsMargins(4 + depth * 12, 2, 4, 2)
+        layout.setSpacing(4)
         self._label = QLabel(text)
-        self._label.setObjectName("sessionMuted" if muted else "sessionName")
+        self._label.setObjectName(_session_label_name(tone, muted))
+        if tip:
+            self.setToolTip(tip)
+            self._label.setToolTip(tip)
         if active:
             font = self._label.font()
             font.setBold(True)
             self._label.setFont(font)
         self._label.setMinimumWidth(0)
         self._label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._delete = QPushButton("Удалить")
+        self._delete = QPushButton("×")
         self._delete.setObjectName("sessionDelete")
+        self._delete.setFixedSize(18, 18)
+        self._delete.setToolTip("Удалить")
         self._delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self._delete.clicked.connect(lambda: self.delete_clicked.emit(session_id))
         self._delete.setVisible(False)
@@ -450,47 +482,70 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("vterminal")
         self.resize(1180, 760)
         self.setMinimumSize(860, 520)
+        self._sidebar_width = 200
+        self._chat_panel_open = True
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._build_sidebar())
+        self._shell = splitter
+        self._sidebar = self._build_sidebar()
+        splitter.addWidget(self._sidebar)
         splitter.addWidget(self._build_pages())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([280, 900])
+        splitter.setSizes([200, 980])
         self.setCentralWidget(splitter)
 
         self.setStyleSheet(STYLESHEET)
+        self._sync_panel_toggles()
+
+    def _icon_button(self, icon, tip: str) -> QPushButton:
+        button = QPushButton()
+        button.setObjectName("toolButton")
+        button.setIcon(icon)
+        button.setIconSize(QSize(15, 15))
+        button.setFixedSize(22, 22)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(tip)
+        return button
+
+    def _panel_toggle(self, icon, tip: str) -> QPushButton:
+        button = self._icon_button(icon, tip)
+        button.setCheckable(True)
+        button.setChecked(True)
+        return button
 
     def _build_sidebar(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("sideBar")
+        panel.setMinimumWidth(100)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(8, 6, 6, 8)
+        layout.setSpacing(2)
 
-        title = QLabel("Сессии")
+        head = QHBoxLayout()
+        head.setSpacing(2)
+        title = QLabel("СЕССИИ")
         title.setObjectName("sidebarTitle")
-        layout.addWidget(title)
+        head.addWidget(title, 1)
 
-        self.new_button = QPushButton("＋  Новая сессия")
-        self.new_button.setObjectName("primaryButton")
+        self.new_button = self._icon_button(plus_icon(), "Новая сессия")
         self.new_button.clicked.connect(self._on_create_session)
-        layout.addWidget(self.new_button)
+        head.addWidget(self.new_button)
 
-        self.settings_button = QPushButton("Настройки")
-        self.settings_button.setObjectName("secondaryButton")
-        self.settings_button.setToolTip(
-            "Модели, правила команд, адрес MCP, мастер-пароль и ключ SSH."
+        self.group_button = self._icon_button(
+            folder_icon(), "Создать группу в корне списка"
+        )
+        self.group_button.clicked.connect(self._on_create_group)
+        head.addWidget(self.group_button)
+
+        self.settings_button = self._icon_button(
+            gear_icon(),
+            "Настройки\nМодели, правила команд, адрес MCP, мастер-пароль и ключ SSH.",
         )
         self.settings_button.clicked.connect(self._on_settings)
-        layout.addWidget(self.settings_button)
-
-        self.group_button = QPushButton("Создать группу")
-        self.group_button.setObjectName("secondaryButton")
-        self.group_button.setToolTip("Новая папка в корне списка подключений")
-        self.group_button.clicked.connect(self._on_create_group)
-        layout.addWidget(self.group_button)
+        head.addWidget(self.settings_button)
+        layout.addLayout(head)
 
         self.session_list = _SessionTree()
         self.session_list.moved.connect(self._on_node_moved)
@@ -498,11 +553,10 @@ class MainWindow(QMainWindow):
         self.session_list.itemCollapsed.connect(self._on_group_collapsed)
         layout.addWidget(self.session_list, 1)
 
-        self.close_button = QPushButton("Закрыть сессию")
-        self.close_button.setObjectName("secondaryButton")
+        self.close_button = self._icon_button(close_icon(), "Закрыть сессию")
         self.close_button.setEnabled(False)
+        self.close_button.setVisible(False)
         self.close_button.clicked.connect(self._on_close_session)
-        layout.addWidget(self.close_button)
 
         return panel
 
@@ -510,6 +564,11 @@ class MainWindow(QMainWindow):
         self._pages = QStackedWidget()
         self._terminal_page = self._build_main_area()
         self._lounge = GeneralChatPage(self._formats.mono)
+        self._lounge_sessions = self._panel_toggle(
+            sidebar_icon("left"), "Показать или скрыть список сессий"
+        )
+        self._lounge_sessions.clicked.connect(self._toggle_sessions)
+        self._lounge.add_tool(self._lounge_sessions)
         self._pages.addWidget(self._terminal_page)
         self._pages.addWidget(self._lounge)
         return self._pages
@@ -522,11 +581,19 @@ class MainWindow(QMainWindow):
         root.setSpacing(8)
 
         header = QHBoxLayout()
-        header.setSpacing(10)
+        header.setSpacing(4)
 
-        title = QLabel("vterminal")
-        title.setObjectName("appTitle")
-        header.addWidget(title)
+        self._sessions_toggle = self._panel_toggle(
+            sidebar_icon("left"), "Показать или скрыть список сессий"
+        )
+        self._sessions_toggle.clicked.connect(self._toggle_sessions)
+        header.addWidget(self._sessions_toggle)
+
+        self._status_label = QLabel("—")
+        self._status_label.setObjectName("statusBadge")
+        self._status_label.setProperty("running", "false")
+        self._status_label.setProperty("closed", "false")
+        header.addWidget(self._status_label)
 
         self._header_label = QLabel("Сессия не выбрана")
         self._header_label.setObjectName("sessionLabel")
@@ -536,22 +603,24 @@ class MainWindow(QMainWindow):
         self._settings_button.setObjectName("iconButton")
         self._settings_button.setIcon(gear_icon())
         self._settings_button.setIconSize(QSize(16, 16))
-        self._settings_button.setFixedSize(28, 28)
+        self._settings_button.setFixedSize(22, 22)
         self._settings_button.setToolTip("Настройки сессии")
         self._settings_button.setVisible(False)
         self._settings_button.clicked.connect(self._on_session_settings)
         header.addWidget(self._settings_button)
+        header.addWidget(self.close_button)
 
         header.addStretch(1)
 
-        self._status_label = QLabel("—")
-        self._status_label.setObjectName("statusBadge")
-        self._status_label.setProperty("running", "false")
-        self._status_label.setProperty("closed", "false")
-        header.addWidget(self._status_label)
+        self._chat_toggle = self._panel_toggle(
+            sidebar_icon("right"), "Показать или скрыть чат"
+        )
+        self._chat_toggle.clicked.connect(self._toggle_chat_panel)
+        header.addWidget(self._chat_toggle)
         root.addLayout(header)
 
         left = QWidget()
+        self._terminal_column = left
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
@@ -604,15 +673,15 @@ class MainWindow(QMainWindow):
         input_panel = QFrame()
         input_panel.setObjectName("inputPanel")
         input_layout = QHBoxLayout(input_panel)
-        input_layout.setContentsMargins(12, 8, 10, 8)
-        input_layout.setSpacing(10)
+        input_layout.setContentsMargins(8, 4, 8, 4)
+        input_layout.setSpacing(4)
         input_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.paste_button = QPushButton()
         self.paste_button.setObjectName("iconButton")
         self.paste_button.setIcon(paste_icon())
         self.paste_button.setIconSize(QSize(16, 16))
-        self.paste_button.setFixedSize(32, 32)
+        self.paste_button.setFixedSize(22, 22)
         self.paste_button.setToolTip(
             "Взять текст из буфера обмена\nи вставить его в поле команды."
         )
@@ -624,7 +693,7 @@ class MainWindow(QMainWindow):
         self.paste_run_button.setObjectName("iconButton")
         self.paste_run_button.setIcon(paste_run_icon())
         self.paste_run_button.setIconSize(QSize(16, 16))
-        self.paste_run_button.setFixedSize(32, 32)
+        self.paste_run_button.setFixedSize(22, 22)
         self.paste_run_button.setToolTip(
             "Взять команду из буфера обмена\n"
             "и сразу выполнить её в текущей сессии.\n"
@@ -634,11 +703,6 @@ class MainWindow(QMainWindow):
         self.paste_run_button.clicked.connect(self._on_paste_run)
         input_layout.addWidget(self.paste_run_button)
 
-        self._prompt_label = QLabel("❯")
-        self._prompt_label.setObjectName("inputPrompt")
-        self._prompt_label.setFont(self._formats.mono)
-        input_layout.addWidget(self._prompt_label)
-
         self.input = CommandInput(self._formats.mono)
         self.input.setPlaceholderText("Выберите сессию слева")
         self.input.textChanged.connect(lambda: self._on_input_changed(self.input.text()))
@@ -646,8 +710,12 @@ class MainWindow(QMainWindow):
         self.input.setEnabled(False)
         input_layout.addWidget(self.input, 1)
 
-        self.send_button = QPushButton("Отправить  ↵")
-        self.send_button.setObjectName("sendButton")
+        self.send_button = QPushButton("Отправить")
+        self.send_button.setObjectName("composerSend")
+        self.send_button.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
+        self.send_button.setFixedHeight(self.input.height())
         self.send_button.setEnabled(False)
         self.send_button.clicked.connect(self._on_submit)
         input_layout.addWidget(self.send_button)
@@ -677,12 +745,13 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setObjectName("historyScroll")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         container = QWidget()
         container.setObjectName("historyHost")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 14)
-        layout.setSpacing(12)
+        layout.setSpacing(8)
         layout.addStretch(1)
         scroll.setWidget(container)
         scroll.viewport().setAutoFillBackground(False)
@@ -779,30 +848,27 @@ class MainWindow(QMainWindow):
     ) -> QTreeWidgetItem:
         is_current = info.session_id == self._active_session_id
         state = self._service.session_state(info.session_id)
-        prefix = "○ " if state == "closed" else "● "
         if state == "closed":
-            availability = "не активна"
+            tone = "closed"
         elif state in ("error", "offline"):
-            availability = "активна · нет соединения"
+            tone = "offline"
         elif state == "running":
-            availability = "активна · выполняется"
+            tone = "running"
         else:
-            availability = "активна"
-        text = (
-            prefix
-            + info.name
-            + self._model_mark(info)
-            + f"  ·  {_provider_label(info.provider)}  ·  {availability}"
-        )
+            tone = "ready"
+        mark = "" if tone == "closed" else "● "
+        text = mark + info.name
         return self._add_tree_row(
             parent,
             info.session_id,
             "session",
             text,
             active=is_current,
-            muted=state == "closed",
+            muted=tone == "closed",
             deletable=True,
             depth=depth,
+            tone=tone,
+            tip=f"({_connection_kind(info.provider)}-соединение)",
         )
 
     def _add_tree_row(
@@ -815,6 +881,8 @@ class MainWindow(QMainWindow):
         muted: bool,
         deletable: bool,
         depth: int = 0,
+        tone: str = "ready",
+        tip: str = "",
     ) -> QTreeWidgetItem:
         item = QTreeWidgetItem()
         item.setData(0, Qt.ItemDataRole.UserRole, node_id)
@@ -834,13 +902,15 @@ class MainWindow(QMainWindow):
             deletable=deletable,
             kind=kind,
             depth=depth,
+            tone=tone,
+            tip=tip,
         )
         row.delete_clicked.connect(self._on_delete_session)
         row.open_requested.connect(self._open_session_from_row)
         row.toggle_requested.connect(self._on_toggle_group)
         row.group_action.connect(self._on_group_action)
         self.session_list.setItemWidget(item, 0, row)
-        item.setSizeHint(0, QSize(0, max(40, row.sizeHint().height())))
+        item.setSizeHint(0, QSize(0, max(24, row.sizeHint().height())))
         return item
 
     def _on_create_group(self) -> None:
@@ -967,9 +1037,10 @@ class MainWindow(QMainWindow):
         sid = self._active_session_id
         if sid == GENERAL_CHAT_ID:
             self.close_button.setEnabled(False)
-            return
-        state = self._service.session_state(sid) if sid is not None else "closed"
-        self.close_button.setEnabled(sid is not None and state != "closed")
+        else:
+            state = self._service.session_state(sid) if sid is not None else "closed"
+            self.close_button.setEnabled(sid is not None and state != "closed")
+        self.close_button.setVisible(self.close_button.isEnabled())
 
     def _open_session_from_row(self, session_id: str) -> None:
         item = self._find_tree_item(session_id)
@@ -1399,7 +1470,6 @@ class MainWindow(QMainWindow):
         state = self._service.session_state(sid) if sid is not None else "closed"
 
         self._update_session_buttons()
-        self._show_shell_prompt(sid, state)
 
         if sid is None:
             self._set_prompt_enabled(False)
@@ -1451,10 +1521,6 @@ class MainWindow(QMainWindow):
 
         self._update_offline_banner(state if sid is not None else "closed")
         self._refresh_status_style()
-
-    def _show_shell_prompt(self, sid: Optional[domain.SessionId], state: str) -> None:
-        label = self._shell_label(sid) if state in ("ready", "running") else ""
-        self._prompt_label.setText(f"{label} ❯" if label else "❯")
 
     def _shell_label(self, sid: Optional[domain.SessionId]) -> str:
         if sid is None:
@@ -1559,8 +1625,15 @@ class MainWindow(QMainWindow):
             event.type() == QEvent.Type.Resize
             and obj.property("vibeHistory")
         ):
+            scroll = obj.parentWidget()
+            if isinstance(scroll, QScrollArea):
+                clamp_scroll_host(scroll)
             self._sync_live_rows()
             return False
+        if obj is getattr(self, "input", None) and event.type() == QEvent.Type.Resize:
+            button = getattr(self, "send_button", None)
+            if button is not None and button.height() != obj.height():
+                button.setFixedHeight(obj.height())
         if obj is getattr(self, "input", None) and event.type() == QEvent.Type.KeyPress:
             if self._completion_list.isVisible():
                 key = event.key()
@@ -1686,7 +1759,10 @@ class MainWindow(QMainWindow):
             state.draft = state.text
 
     def _save_chat_draft(self, session_id: Optional[domain.SessionId]) -> None:
-        if session_id is None or self.chat_pane.isHidden():
+        if session_id is None or session_id == GENERAL_CHAT_ID:
+            return
+        info = self._service.get_session(session_id)
+        if info is None or not info.llm_profile_id:
             return
         self._chat_drafts[session_id] = self.chat_pane.input_text()
 
@@ -1694,6 +1770,8 @@ class MainWindow(QMainWindow):
         info = self._service.get_session(session_id) if session_id else None
         if info is None or not info.llm_profile_id:
             self.chat_pane.setVisible(False)
+            self._set_split_gap(False)
+            self._sync_panel_toggles()
             return
         messages = []
         try:
@@ -1711,7 +1789,9 @@ class MainWindow(QMainWindow):
                 messages.append(("reset", ""))
             elif event.event_type == domain.EventType.CHAT_TOOL:
                 messages.append(("result", event.payload))
-        self.chat_pane.setVisible(True)
+        opening = not self.chat_pane.isVisible()
+        self.chat_pane.setVisible(self._chat_panel_open)
+        self._set_split_gap(self._chat_panel_open)
         self.chat_pane.set_messages(messages)
         self._show_chat_context(session_id)
         waiting = session_id in self._chat_wait
@@ -1720,7 +1800,61 @@ class MainWindow(QMainWindow):
         self.chat_pane.set_input_text(self._chat_drafts.get(session_id, ""))
         self.chat_pane.set_problem(self._chat_problem(session_id, info))
         self._show_pending_mcp(session_id)
-        self._work_split.setSizes([500, 420])
+        if self._chat_panel_open and opening:
+            self._work_split.setSizes([500, 420])
+        self._sync_panel_toggles()
+
+    def _toggle_sessions(self, _checked: bool = False) -> None:
+        show = not self._sidebar.isVisible()
+        if not show:
+            width = self._shell.sizes()[0]
+            if width > 40:
+                self._sidebar_width = width
+        self._sidebar.setVisible(show)
+        if show:
+            sizes = self._shell.sizes()
+            total = sum(sizes) or self.width()
+            side = self._sidebar_width or 200
+            self._shell.setSizes([side, max(1, total - side)])
+        self._sync_panel_toggles()
+
+    def _toggle_chat_panel(self, _checked: bool = False) -> None:
+        info = (
+            self._service.get_session(self._active_session_id)
+            if self._active_session_id
+            else None
+        )
+        if info is None or not info.llm_profile_id:
+            return
+        if self.chat_pane.isVisible():
+            self._save_chat_draft(self._active_session_id)
+        self._chat_panel_open = not self._chat_panel_open
+        self._sync_chat(self._active_session_id)
+
+    def _sync_panel_toggles(self) -> None:
+        shown = self._sidebar.isVisible()
+        self._sessions_toggle.setChecked(shown)
+        lounge = getattr(self, "_lounge_sessions", None)
+        if lounge is not None:
+            lounge.setChecked(shown)
+        info = (
+            self._service.get_session(self._active_session_id)
+            if self._active_session_id and self._active_session_id != GENERAL_CHAT_ID
+            else None
+        )
+        has_chat = bool(info and info.llm_profile_id)
+        self._chat_toggle.setEnabled(has_chat)
+        self._chat_toggle.setChecked(has_chat and self.chat_pane.isVisible())
+
+    def _set_split_gap(self, chat_open: bool) -> None:
+        """Поля команды и промпта отступают от общей границы панелей."""
+        gap = 12 if chat_open else 0
+        column = self._terminal_column.layout()
+        if column is not None:
+            column.setContentsMargins(0, 0, gap, 0)
+        chat = self.chat_pane.layout()
+        if chat is not None:
+            chat.setContentsMargins(gap, 0, 0, 0)
 
     def _chat_problem(
         self, session_id: domain.SessionId, info: domain.SessionInfo
@@ -2331,7 +2465,6 @@ class MainWindow(QMainWindow):
         fmt: Optional[QTextCharFormat] = None,
     ) -> None:
         card = CommandCard("Система", self._formats.mono)
-        card.copy_button.hide()
         card.resend_button.hide()
         card.delete_button.hide()
         card.command_label.setText("Система")
@@ -2347,6 +2480,10 @@ class MainWindow(QMainWindow):
         scroll: Optional[QScrollArea] = None,
     ) -> None:
         target = layout or self.history_layout
+        index = target.count() - 1
+        if index > 0:
+            target.insertWidget(index, self._command_divider())
+            index += 1
         if isinstance(widget, CommandCard):
             widget.remove_requested.connect(self._on_card_remove)
             widget.resend_requested.connect(self._on_card_resend)
@@ -2359,8 +2496,14 @@ class MainWindow(QMainWindow):
             ):
                 widget.set_attach_visible(True)
                 widget.attach_requested.connect(self._on_attach_command)
-        target.insertWidget(target.count() - 1, widget)
+        target.insertWidget(index, widget)
         self._scroll_to_bottom(scroll or self.history_scroll)
+
+    def _command_divider(self) -> QFrame:
+        line = QFrame()
+        line.setObjectName("commandDivider")
+        line.setFixedHeight(1)
+        return line
 
     def _scroll_to_bottom(self, scroll: Optional[QScrollArea] = None) -> None:
         target = scroll or self.history_scroll
@@ -2378,6 +2521,9 @@ class MainWindow(QMainWindow):
         parent = card.parentWidget()
         layout = parent.layout() if parent is not None else None
         if layout is not None:
+            index = layout.indexOf(card)
+            if index >= 0:
+                self._drop_command_divider(layout, index)
             layout.removeWidget(card)
         card.setParent(None)
         card.deleteLater()
@@ -2394,6 +2540,17 @@ class MainWindow(QMainWindow):
                     pass
             if session_id == self._active_session_id:
                 self._update_input_state()
+
+    def _drop_command_divider(self, layout: QVBoxLayout, index: int) -> None:
+        for neighbor in (index - 1, index + 1):
+            if neighbor < 0 or neighbor >= layout.count():
+                continue
+            item = layout.itemAt(neighbor)
+            widget = item.widget() if item is not None else None
+            if widget is not None and widget.objectName() == "commandDivider":
+                layout.removeWidget(widget)
+                widget.deleteLater()
+                return
 
     def _on_card_resend(self, card: CommandCard) -> None:
         sid = self._active_session_id
