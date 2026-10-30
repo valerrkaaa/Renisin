@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -29,8 +30,9 @@ from application.terminal_mcp import (
     split_shell_commands,
 )
 from drivers.llm import LlmToolCall, LlmTurn, LmStudioClient
-from mcp_host import TerminalMcpServer
+from mcp_host import TerminalMcpServer, parse_mcp_host, parse_mcp_ports
 from storage.command_allow import FileCommandAllowStore
+from storage.mcp_settings import FileMcpSettings
 
 
 class _Journal:
@@ -1864,6 +1866,66 @@ class LoungeChatTests(unittest.TestCase):
         self.assertIsNone(box.get("error"))
         self.assertEqual(service.lounge_messages(tab.tab_id), [("user", "стоп")])
         self.assertEqual(service.lounge_problem(tab.tab_id), "")
+
+
+class McpListenTests(unittest.TestCase):
+    def test_ports_accept_a_range_or_a_list(self) -> None:
+        self.assertEqual(parse_mcp_ports("47321-47323"), (47321, 47322, 47323))
+        self.assertEqual(parse_mcp_ports("9, 9, 10"), (9, 10))
+        self.assertEqual(parse_mcp_host(" 127.0.0.1 "), "127.0.0.1")
+        with self.assertRaises(ValueError):
+            parse_mcp_ports("47330-47321")
+        with self.assertRaises(ValueError):
+            parse_mcp_host("localhost")
+
+    def test_saved_port_is_the_one_that_listens(self) -> None:
+        first, second, busy = _free_ports(3)
+        service, _driver, _profiles = _world()
+        directory = tempfile.mkdtemp()
+        settings = FileMcpSettings(os.path.join(directory, "mcp.json"))
+        service._mcp_settings = settings
+        server = TerminalMcpServer(service, "127.0.0.1", (first,))
+        service.attach_mcp(server)
+        held = socket.socket()
+        held.bind(("127.0.0.1", busy))
+        try:
+            endpoint = service.update_mcp_listen("127.0.0.1", (second,), str(second))
+            self.assertEqual(endpoint, f"http://127.0.0.1:{second}/mcp")
+            self.assertEqual(settings.load(), ("127.0.0.1", str(second)))
+            self.assertEqual(
+                _post(endpoint, {"jsonrpc": "2.0", "id": 1, "method": "ping"})["result"],
+                {},
+            )
+            again = service.update_mcp_listen("127.0.0.1", (second,), str(second))
+            self.assertEqual(again, endpoint)
+            self.assertEqual(
+                _post(endpoint, {"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"],
+                {},
+            )
+            with self.assertRaises(OSError):
+                service.update_mcp_listen("127.0.0.1", (busy,), str(busy))
+            self.assertEqual(service.mcp_endpoint(), f"http://127.0.0.1:{second}/mcp")
+            self.assertEqual(settings.load(), ("127.0.0.1", str(second)))
+            self.assertEqual(
+                _post(endpoint, {"jsonrpc": "2.0", "id": 3, "method": "ping"})["result"],
+                {},
+            )
+        finally:
+            held.close()
+            server.stop()
+
+
+def _free_ports(count: int) -> list:
+    sockets = []
+    ports = []
+    for _index in range(count):
+        held = socket.socket()
+        held.bind(("127.0.0.1", 0))
+        ports.append(held.getsockname()[1])
+        sockets.append(held)
+    for held in sockets:
+        held.close()
+    return ports
 
 
 def _post(url: str, payload: dict) -> dict:

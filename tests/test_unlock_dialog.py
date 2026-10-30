@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
 import domain
+from application.master_password import connection_journal_password
 from ui.dialogs import UnlockSessionDialog, _ChainPasswordRow
 
 
@@ -32,36 +33,25 @@ class UnlockDialogTests(unittest.TestCase):
             ssh=domain.SSHConfig(host="h", username="root", auth_method=method),
         )
 
-    def test_empty_journal_uses_ssh_password(self) -> None:
-        dialog = UnlockSessionDialog(object(), self._ssh_info())  # type: ignore[arg-type]
-        self.assertFalse(dialog._journal_hint.isHidden())
-        self.assertEqual(dialog.password_edit.placeholderText(), "пароль SSH")
+    def test_ssh_password_is_the_journal_password(self) -> None:
+        info = self._ssh_info()
+        dialog = UnlockSessionDialog(object(), info)  # type: ignore[arg-type]
+        self.assertFalse(hasattr(dialog, "password_edit"))
         self.assertEqual(
-            dialog._resolved_journal_password(
-                domain.SSHAuthMethod.PASSWORD, "secret"
+            connection_journal_password(
+                domain.ProviderType.SSH, info.ssh, "secret"
             ),
             "secret",
         )
-        dialog.password_edit.setText("journal")
-        self.assertEqual(
-            dialog._resolved_journal_password(
-                domain.SSHAuthMethod.PASSWORD, "secret"
-            ),
-            "journal",
-        )
         dialog.close()
 
-    def test_key_auth_does_not_fill_journal_from_passphrase(self) -> None:
-        dialog = UnlockSessionDialog(
-            object(),  # type: ignore[arg-type]
-            self._ssh_info(domain.SSHAuthMethod.PRIVATE_KEY),
-        )
-        self.assertFalse(dialog._journal_hint.isVisible())
-        self.assertEqual(
-            dialog._resolved_journal_password(
-                domain.SSHAuthMethod.PRIVATE_KEY, "phrase"
-            ),
-            "",
+    def test_key_auth_does_not_use_the_passphrase_as_journal(self) -> None:
+        info = self._ssh_info(domain.SSHAuthMethod.PRIVATE_KEY)
+        dialog = UnlockSessionDialog(object(), info)  # type: ignore[arg-type]
+        self.assertIsNone(
+            connection_journal_password(
+                domain.ProviderType.SSH, info.ssh, "phrase"
+            )
         )
         dialog.close()
 
@@ -95,7 +85,6 @@ class UnlockDialogTests(unittest.TestCase):
         self.assertEqual(dialog._chain_rows[0].endpoint.text(), "root@10.0.0.1")
         self.assertEqual(dialog._chain_rows[1].endpoint.text(), "ubuntu@10.0.0.2:2200")
         self.assertEqual(dialog.findChildren(QPushButton, "auxButton"), [])
-        self.assertFalse(dialog._kept_in_tab_order(dialog.password_edit))
         self.assertIs(dialog.focusWidget(), dialog._chain_rows[0].password)
         QTest.keyClick(dialog.focusWidget(), Qt.Key.Key_Tab)
         self.assertIs(dialog.focusWidget(), dialog._chain_rows[1].password)
@@ -154,7 +143,6 @@ class UnlockDialogTests(unittest.TestCase):
         assert dialog._chain_rows[1].note is not None
         self.assertEqual(dialog._chain_rows[1].note.text(), "Используется ключ")
         self.assertEqual(dialog.findChildren(QPushButton, "auxButton"), [])
-        self.assertFalse(dialog._journal_hint.isHidden())
         assert dialog._chain_rows[0].password is not None
         dialog._chain_rows[0].password.setText("one")
         built = dialog._unlock_chain()
@@ -165,8 +153,9 @@ class UnlockDialogTests(unittest.TestCase):
         self.assertEqual(config.auth_method, domain.SSHAuthMethod.PASSWORD)
         self.assertEqual(config.hops[0].auth_method, domain.SSHAuthMethod.PRIVATE_KEY)
         self.assertEqual(config.hops[0].private_key_path, "C:/keys/ubuntu")
-        self.assertEqual(
-            dialog._resolved_journal_password(config.auth_method, secret),
-            "one",
+        self.assertIsNone(
+            connection_journal_password(
+                domain.ProviderType.SSH_OVER_SSH, config, secret, hops
+            )
         )
         dialog.close()

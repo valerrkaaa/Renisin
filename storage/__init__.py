@@ -7,6 +7,7 @@ from storage.command_rules import FileCommandRuleStore
 from storage.journal import EncryptedJournalRepository
 from storage.llm_profiles import FileLlmProfileStore
 from storage.lounge import FileLoungeStore
+from storage.mcp_settings import FileMcpSettings
 
 __all__ = [
     "FileCommandAllowStore",
@@ -15,4 +16,5 @@ __all__ = [
     "EncryptedJournalRepository",
     "FileLlmProfileStore",
     "FileLoungeStore",
+    "FileMcpSettings",
 ]

@@ -13,13 +13,14 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from application import ApplicationService
 from drivers import DriverFactory, RoutingLlmClient
-from mcp_host import TerminalMcpServer
+from mcp_host import TerminalMcpServer, parse_mcp_ports
 from storage import (
     EncryptedJournalRepository,
     FileCommandAllowStore,
     FileCommandRuleStore,
     FileLlmProfileStore,
     FileLoungeStore,
+    FileMcpSettings,
     FileSessionCatalog,
 )
 from ui import MainWindow
@@ -128,6 +129,8 @@ def main() -> int:
     llm_profiles = FileLlmProfileStore(os.path.join(data_dir, "llm_profiles.json"))
     command_allow = FileCommandAllowStore(os.path.join(data_dir, "mcp_allow.json"))
     command_rules = FileCommandRuleStore(os.path.join(data_dir, "command_rules.json"))
+    mcp_settings = FileMcpSettings(os.path.join(data_dir, "mcp.json"))
+    listen_host, mcp_ports_text = mcp_settings.load()
 
     host_key_verifier = QtHostKeyVerifier()
     factory = DriverFactory(
@@ -144,9 +147,12 @@ def main() -> int:
         command_allow=command_allow,
         command_rules=command_rules,
         lounge_store=FileLoungeStore(os.path.join(data_dir, "lounge.json")),
+        mcp_settings=mcp_settings,
     )
     try:
-        service.attach_mcp(TerminalMcpServer(service))
+        service.attach_mcp(
+            TerminalMcpServer(service, listen_host, parse_mcp_ports(mcp_ports_text))
+        )
     except OSError:
         pass
 

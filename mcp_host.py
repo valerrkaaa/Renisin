@@ -4,11 +4,12 @@
 """Локальный MCP-сервер: инструмент run_command для активной сессии терминала."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
+from typing import Optional, Sequence
 
 from application.terminal_mcp import (
     TOOL_DESCRIPTION,
@@ -18,27 +19,102 @@ from application.terminal_mcp import (
 )
 
 
-_HOST = "127.0.0.1"
-_PORT_FIRST = 47321
-_PORT_LAST = 47340
+DEFAULT_MCP_HOST = "127.0.0.1"
+DEFAULT_MCP_PORTS = "47321-47340"
+_MAX_MCP_PORTS = 64
+
+
+def parse_mcp_host(text: str) -> str:
+    """IP, на котором слушает MCP. Пустая строка и имена хостов не подходят."""
+    host = text.strip()
+    if not host or any(char.isspace() for char in host) or "/" in host:
+        raise ValueError("Укажите IP-адрес")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError("IP-адрес указан неверно") from exc
+    return host
+
+
+def parse_mcp_ports(text: str) -> tuple:
+    """Один порт, список через запятую или диапазон: 47321-47340."""
+    raw = text.strip()
+    if not raw:
+        raise ValueError("Укажите порт или диапазон портов")
+    found = []
+    for part in raw.split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        if "-" in piece:
+            bounds = piece.split("-")
+            if len(bounds) != 2 or not bounds[0].strip() or not bounds[1].strip():
+                raise ValueError(f"Непонятный диапазон: {piece}")
+            start = _port_number(bounds[0])
+            end = _port_number(bounds[1])
+            if end < start:
+                raise ValueError(f"Диапазон идёт в обратную сторону: {piece}")
+            found.extend(range(start, end + 1))
+            continue
+        found.append(_port_number(piece))
+    unique = []
+    seen = set()
+    for port in found:
+        if port in seen:
+            continue
+        seen.add(port)
+        unique.append(port)
+    if not unique:
+        raise ValueError("Укажите порт или диапазон портов")
+    if len(unique) > _MAX_MCP_PORTS:
+        raise ValueError(f"Слишком много портов: не больше {_MAX_MCP_PORTS}")
+    return tuple(unique)
+
+
+def _port_number(text: str) -> int:
+    piece = text.strip()
+    try:
+        value = int(piece)
+    except ValueError as exc:
+        raise ValueError(f"Порт должен быть числом: {piece}") from exc
+    if not 1 <= value <= 65535:
+        raise ValueError(f"Порт вне диапазона 1–65535: {value}")
+    return value
 
 
 class TerminalMcpServer:
-    def __init__(self, service) -> None:
+    def __init__(self, service, host: str = DEFAULT_MCP_HOST, ports: Optional[Sequence[int]] = None) -> None:
         self._service = service
+        self._host = host or DEFAULT_MCP_HOST
+        self._ports = tuple(ports) if ports else parse_mcp_ports(DEFAULT_MCP_PORTS)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self.endpoint = ""
 
+    def listen(self) -> tuple:
+        """Адрес и порты, которые сервер пытается занять. Это не число сессий."""
+        return self._host, self._ports
+
+    def running(self) -> bool:
+        return self._httpd is not None
+
+    def rebind(self, host: str, ports: Sequence[int]) -> str:
+        """Останавливает текущий сокет и занимает новый адрес. Первый свободный порт из списка."""
+        self.stop()
+        self._host = host
+        self._ports = tuple(ports)
+        return self.start()
+
     def start(self) -> str:
         if self._httpd is not None:
             return self.endpoint
+        self.endpoint = ""
         handler = _handler_class(self._service)
         last: Optional[OSError] = None
         httpd: Optional[_ExclusiveServer] = None
-        for port in range(_PORT_FIRST, _PORT_LAST + 1):
+        for port in self._ports:
             try:
-                httpd = _ExclusiveServer((_HOST, port), handler)
+                httpd = _ExclusiveServer((self._host, port), handler)
             except OSError as exc:
                 last = exc
                 continue
@@ -47,7 +123,8 @@ class TerminalMcpServer:
             raise OSError(last or "Не удалось занять порт MCP")
         httpd.daemon_threads = True
         self._httpd = httpd
-        self.endpoint = f"http://{_HOST}:{httpd.server_address[1]}/mcp"
+        shown = f"[{self._host}]" if ":" in self._host else self._host
+        self.endpoint = f"http://{shown}:{httpd.server_address[1]}/mcp"
         thread = threading.Thread(target=httpd.serve_forever, name="mcp", daemon=True)
         self._thread = thread
         thread.start()

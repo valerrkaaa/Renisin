@@ -711,6 +711,41 @@ class ChatUiTests(unittest.TestCase):
         self.assertEqual(dialog.url_edit.text(), "http://10.0.0.2:1234/v1")
         dialog.close()
 
+    def test_settings_hold_models_rules_and_mcp(self) -> None:
+        from PySide6.QtWidgets import QApplication, QTabWidget
+
+        from ui.settings_dialog import SettingsDialog
+
+        class Stub:
+            def list_llm_profiles(self):
+                return []
+
+            def command_rule_lists(self):
+                return {}
+
+            def mcp_listen(self):
+                return ("127.0.0.1", "47321-47340")
+
+            def mcp_endpoint(self, session_id=None):
+                return "http://127.0.0.1:47321/mcp"
+
+        dialog = SettingsDialog(Stub())  # type: ignore[arg-type]
+        dialog.show()
+        QApplication.processEvents()
+        tabs = dialog.findChild(QTabWidget)
+        assert tabs is not None
+        self.assertEqual(
+            [tabs.tabText(index) for index in range(tabs.count())],
+            ["MCP", "Модели", "Правила"],
+        )
+        self.assertEqual(dialog._host.text(), "127.0.0.1")
+        self.assertEqual(dialog._ports.text(), "47321-47340")
+        self.assertFalse(dialog._exposure.isVisible())
+        dialog._host.setText("10.0.0.8")
+        QApplication.processEvents()
+        self.assertTrue(dialog._exposure.isVisible())
+        dialog.close()
+
     def test_split_attach_and_dialog(self) -> None:
         from PySide6.QtWidgets import QDialog
 
@@ -786,6 +821,9 @@ class ChatUiTests(unittest.TestCase):
 
         service = FakeService()
         window = MainWindow(service)
+        self.assertEqual(window.settings_button.text(), "Настройки")
+        self.assertFalse(hasattr(window, "models_button"))
+        self.assertFalse(hasattr(window, "rules_button"))
         window._activate_session("a")
         self.assertFalse(window._offline_banner.isHidden())
         self.assertFalse(window.chat_pane.isHidden())

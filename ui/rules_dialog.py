@@ -155,7 +155,9 @@ class _RuleRow(QWidget):
         layout.addWidget(remove)
 
 
-class RulesDialog(QDialog):
+class RulesDialog(QWidget):
+    """Списки шаблонов. Живут на вкладке настроек."""
+
     def __init__(
         self,
         service: ApplicationService,
@@ -163,9 +165,6 @@ class RulesDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._service = service
-        self.setWindowTitle("Правила команд")
-        self.setModal(True)
-        self.resize(860, 480)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 14)
@@ -186,11 +185,6 @@ class RulesDialog(QDialog):
         for family, title in _FAMILIES:
             columns.addWidget(self._column(family, title), 1)
         layout.addLayout(columns, 1)
-
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(self.reject)
-        close.accepted.connect(self.accept)
-        layout.addWidget(close)
         self._reload()
 
     def _column(self, family: str, title: str) -> QWidget:

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 import domain
 from application import ApplicationService, SessionUnavailable
+from application.master_password import connection_journal_password
 
 
 class _HopFields(QWidget):
@@ -243,6 +244,104 @@ class NewSessionRequest:
     shell_family: str = domain.SHELL_UNIX
 
 
+class MasterPasswordDialog(QDialog):
+    """Первый мастер-пароль за запуск. Два поля сравниваются по хешу."""
+
+    def __init__(
+        self,
+        service: ApplicationService,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._service = service
+        self.setWindowTitle("Мастер-пароль")
+        self.setModal(True)
+        self.resize(460, 240)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setSpacing(10)
+        hint = QLabel(
+            "Нужен для журналов без пароля подключения: локальная консоль "
+            "и SSH по ключу. Вводится один раз за запуск и остаётся только в памяти."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#8b949e;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        self._password = QLineEdit()
+        self._password.setEchoMode(QLineEdit.EchoMode.Password)
+        self._password.returnPressed.connect(self._on_ok)
+        form.addRow("Мастер-пароль", self._password)
+        self._confirm = QLineEdit()
+        self._confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        self._confirm.returnPressed.connect(self._on_ok)
+        form.addRow("Подтверждение", self._confirm)
+        layout.addLayout(form)
+
+        self._error = QLabel("")
+        self._error.setWordWrap(True)
+        self._error.setStyleSheet("color:#ff8a80; font-weight:600;")
+        self._error.setVisible(False)
+        layout.addWidget(self._error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_ok)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def password(self) -> str:
+        return self._service.master_password()
+
+    def _on_ok(self) -> None:
+        try:
+            self._service.set_master_password(
+                self._password.text(), self._confirm.text()
+            )
+        except ValueError as exc:
+            self._error.setText(str(exc))
+            self._error.setVisible(True)
+            return
+        self._password.clear()
+        self._confirm.clear()
+        self.accept()
+
+
+def ask_journal_password(
+    service: ApplicationService,
+    provider: domain.ProviderType,
+    ssh: Optional[domain.SSHConfig],
+    auth_secret: Optional[str],
+    hop_secrets: tuple[str, ...],
+    parent: Optional[QWidget] = None,
+) -> Optional[str]:
+    """Пароль журнала: пароль последней машины или мастер-пароль этого запуска."""
+    bound = connection_journal_password(provider, ssh, auth_secret, hop_secrets)
+    if bound:
+        return bound
+    if service.has_master_password():
+        return service.master_password()
+    dialog = MasterPasswordDialog(service, parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
+    return dialog.password()
+
+
+def _prove_master_password(service: ApplicationService) -> None:
+    prove = getattr(service, "prove_master_password", None)
+    if callable(prove):
+        prove()
+
+
+def _forget_unproven_master_password(service: ApplicationService) -> None:
+    forget = getattr(service, "forget_unproven_master_password", None)
+    if callable(forget):
+        forget()
+
+
 class _SessionCallDialog(QDialog):
     """Диалог, который ждёт create/open вне GUI-потока."""
 
@@ -315,8 +414,9 @@ class CreateSessionDialog(_SessionCallDialog):
         layout.setSpacing(12)
 
         info = QLabel(
-            "Пароль журнала защищает историю сессии. Это не пароль Windows "
-            "и не пароль SSH. Пароль нельзя восстановить."
+            "История шифруется паролем последней машины. "
+            "Локальная консоль и вход по ключу используют мастер-пароль: "
+            "он спрашивается один раз за запуск и остаётся только в памяти."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color:#8b949e;")
@@ -360,7 +460,7 @@ class CreateSessionDialog(_SessionCallDialog):
         self.profile_combo = QComboBox()
         llm_form.addRow("Модель", self.profile_combo)
         self._llm_empty = QLabel(
-            "Сначала добавьте модель кнопкой «Модели» в боковой панели."
+            "Сначала добавьте модель в настройках."
         )
         self._llm_empty.setWordWrap(True)
         self._llm_empty.setStyleSheet("color:#8b949e;")
@@ -460,18 +560,6 @@ class CreateSessionDialog(_SessionCallDialog):
         chain_layout.addWidget(self._add_hop, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self._chain_container)
         self._add_hop_row()
-
-        # --- Пароль журнала ----------------------------------------------
-
-        pw_form = QFormLayout()
-        pw_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        pw_form.addRow("Пароль журнала", self.password_edit)
-        self.confirm_edit = QLineEdit()
-        self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        pw_form.addRow("Подтверждение", self.confirm_edit)
-        layout.addLayout(pw_form)
 
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
@@ -603,14 +691,13 @@ class CreateSessionDialog(_SessionCallDialog):
 
     def _finish_call(self, info: object, error: object) -> None:
         self._set_busy(False)
+        _prove_master_password(self._service)
         if error is not None:
             self._created = None
             exc = error if isinstance(error, BaseException) else Exception(str(error))
             self._set_error(str(exc) or exc.__class__.__name__)
             return
         self._created = info  # type: ignore[assignment]
-        self.password_edit.clear()
-        self.confirm_edit.clear()
         self.ssh_password.clear()
         self.ssh_passphrase.clear()
         for row in self._hop_rows:
@@ -632,17 +719,9 @@ class CreateSessionDialog(_SessionCallDialog):
         self._clear_error()
 
         name = self.name_edit.text().strip()
-        pw = self.password_edit.text()
-        confirm = self.confirm_edit.text()
 
         if not name:
             self._set_error("Имя сессии не может быть пустым")
-            return
-        if not pw:
-            self._set_error("Пароль журнала не может быть пустым")
-            return
-        if pw != confirm:
-            self._set_error("Пароли не совпадают")
             return
 
         provider_key = self.provider_combo.currentData()
@@ -651,7 +730,7 @@ class CreateSessionDialog(_SessionCallDialog):
             llm_profile_id = self.profile_combo.currentData()
             if not llm_profile_id:
                 self._set_error(
-                    "Сначала добавьте модель кнопкой «Модели» в боковой панели."
+                    "Сначала добавьте модель в настройках."
                 )
                 return
             provider_key = self.terminal_combo.currentData()
@@ -659,7 +738,7 @@ class CreateSessionDialog(_SessionCallDialog):
         if provider_key == "cmd":
             request = NewSessionRequest(
                 name=name,
-                journal_password=pw,
+                journal_password="",
                 provider=domain.ProviderType.CMD,
                 ssh=None,
                 auth_secret=None,
@@ -667,7 +746,7 @@ class CreateSessionDialog(_SessionCallDialog):
                 shell_family=self._shell_family(),
             )
         elif provider_key == "ssh_over_ssh":
-            built = self._chain_request(name, pw, llm_profile_id)
+            built = self._chain_request(name, "", llm_profile_id)
             if built is None:
                 return
             request = built
@@ -698,7 +777,7 @@ class CreateSessionDialog(_SessionCallDialog):
 
             request = NewSessionRequest(
                 name=name,
-                journal_password=pw,
+                journal_password="",
                 provider=domain.ProviderType.SSH,
                 ssh=domain.SSHConfig(
                     host=host,
@@ -712,6 +791,17 @@ class CreateSessionDialog(_SessionCallDialog):
                 shell_family=self._shell_family(),
             )
 
+        journal_password = ask_journal_password(
+            self._service,
+            request.provider,
+            request.ssh,
+            request.auth_secret,
+            request.hop_secrets,
+            self,
+        )
+        if journal_password is None:
+            return
+        request.journal_password = journal_password
         secret = request.auth_secret
 
         def call() -> object:
@@ -883,31 +973,14 @@ class UnlockSessionDialog(_SessionCallDialog):
         )
         layout.addWidget(header)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.returnPressed.connect(self._on_ok)
-        self._journal_hint = QLabel(
-            "Если оставить пустым, сюда подставится пароль SSH."
-        )
-        self._journal_hint.setWordWrap(True)
-        self._journal_hint.setStyleSheet("color:#a1a1aa;")
-        journal_box = QWidget()
-        journal_layout = QVBoxLayout(journal_box)
-        journal_layout.setContentsMargins(0, 0, 0, 0)
-        journal_layout.setSpacing(4)
-        journal_layout.addWidget(self.password_edit)
-        journal_layout.addWidget(self._journal_hint)
-        self._journal_box = journal_box
-        form.addRow("Пароль журнала", journal_box)
-        if reconnect:
-            journal_box.hide()
-            password_label = form.labelForField(journal_box)
-            if password_label is not None:
-                password_label.hide()
-        self._journal_hint.setVisible(False)
+        if (
+            not reconnect
+            and session_info.provider == domain.ProviderType.CMD
+        ):
+            note = QLabel("Журнал откроется мастер-паролем этого запуска.")
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#8b949e;")
+            layout.addWidget(note)
 
         # --- SSH: логин, метод, секрет -----------------------------------
 
@@ -996,15 +1069,7 @@ class UnlockSessionDialog(_SessionCallDialog):
                     hop.private_key_path,
                 )
             layout.addWidget(self._chain_container)
-            first = self._chain_rows[0]
-            if (
-                not reconnect
-                and first.auth_method() == domain.SSHAuthMethod.PASSWORD
-            ):
-                self._journal_hint.setVisible(True)
-                self.password_edit.setPlaceholderText("пароль SSH")
 
-        layout.addLayout(form)
         layout.addStretch(1)
         if self.ssh_auth is not None:
             self._on_auth_changed()
@@ -1064,11 +1129,6 @@ class UnlockSessionDialog(_SessionCallDialog):
                 label.setVisible(is_password or is_key)
         self.ssh_secret.setVisible(is_password or is_key)
         self.ssh_key_path.setVisible(is_key)
-        show_journal_fill = is_password and not self._reconnect
-        self._journal_hint.setVisible(show_journal_fill)
-        self.password_edit.setPlaceholderText(
-            "пароль SSH" if show_journal_fill else ""
-        )
         if self._ssh_container is not None:
             key_label = self._ssh_form.labelForField(self.ssh_key_path)
             if key_label is not None:
@@ -1098,12 +1158,15 @@ class UnlockSessionDialog(_SessionCallDialog):
 
     def _finish_call(self, info: object, error: object) -> None:
         self._set_busy(False)
+        if error is None or isinstance(error, SessionUnavailable):
+            _prove_master_password(self._service)
+        else:
+            _forget_unproven_master_password(self._service)
         if isinstance(error, SessionUnavailable):
             if self._reconnect:
                 self._set_error(error.reason)
                 return
             self._opened = error.info
-            self.password_edit.clear()
             if self.ssh_secret is not None:
                 self.ssh_secret.clear()
             for row in self._chain_rows:
@@ -1116,7 +1179,6 @@ class UnlockSessionDialog(_SessionCallDialog):
             self._set_error(str(exc) or exc.__class__.__name__)
             return
         self._opened = info  # type: ignore[assignment]
-        self.password_edit.clear()
         if self.ssh_secret is not None:
             self.ssh_secret.clear()
         for row in self._chain_rows:
@@ -1137,20 +1199,8 @@ class UnlockSessionDialog(_SessionCallDialog):
         if self.ssh_secret is not None and self.ssh_secret.isVisible():
             self.ssh_secret.setFocus(Qt.FocusReason.OtherFocusReason)
             return
-        if self.password_edit.isVisible():
-            self.password_edit.setFocus(Qt.FocusReason.OtherFocusReason)
-
-    def _resolved_journal_password(
-        self,
-        ssh_method: Optional[domain.SSHAuthMethod],
-        ssh_secret: Optional[str],
-    ) -> str:
-        typed = self.password_edit.text()
-        if typed or self._reconnect:
-            return typed
-        if ssh_method == domain.SSHAuthMethod.PASSWORD and ssh_secret:
-            return ssh_secret
-        return ""
+        if self._ok_button is not None:
+            self._ok_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_ok(self) -> None:
         if self._busy:
@@ -1167,14 +1217,12 @@ class UnlockSessionDialog(_SessionCallDialog):
         ssh_override: Optional[domain.SSHConfig] = None
         ssh_secret: Optional[str] = None
         hop_secrets: tuple[str, ...] = ()
-        ssh_method: Optional[domain.SSHAuthMethod] = None
 
         if self._session_info.provider == domain.ProviderType.SSH_OVER_SSH:
             built = self._unlock_chain()
             if built is None:
                 return
             ssh_override, ssh_secret, hop_secrets = built
-            ssh_method = ssh_override.auth_method
         elif (
             self._session_info.provider == domain.ProviderType.SSH
             and self.ssh_user is not None
@@ -1188,7 +1236,6 @@ class UnlockSessionDialog(_SessionCallDialog):
                 return
 
             method = domain.SSHAuthMethod(self.ssh_auth.currentData())
-            ssh_method = method
             key_path = self.ssh_key_path.text().strip() or None
 
             if method == domain.SSHAuthMethod.PASSWORD:
@@ -1214,10 +1261,18 @@ class UnlockSessionDialog(_SessionCallDialog):
                 ),
             )
 
-        journal_pw = self._resolved_journal_password(ssh_method, ssh_secret)
-        if not self._reconnect and not journal_pw:
-            self._set_error("Введите пароль журнала")
-            return
+        journal_pw = ""
+        if not self._reconnect:
+            journal_pw = ask_journal_password(
+                self._service,
+                self._session_info.provider,
+                ssh_override or self._session_info.ssh,
+                ssh_secret,
+                hop_secrets,
+                self,
+            )
+            if not journal_pw:
+                return
 
         session_id = self._session_info.session_id
         if self._reconnect:
@@ -1261,11 +1316,6 @@ class UnlockSessionDialog(_SessionCallDialog):
         add_hop = getattr(self, "_add_chain_hop", None)
         if add_hop is not None and self._kept_in_tab_order(add_hop):
             widgets.append(add_hop)
-        if self._kept_in_tab_order(self.password_edit):
-            self.password_edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            widgets.append(self.password_edit)
-        else:
-            self.password_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         if self._ok_button is not None:
             widgets.append(self._ok_button)
         if self._cancel_button is not None:

@@ -188,7 +188,9 @@ class ProfileFormDialog(QDialog):
         self._error.setVisible(True)
 
 
-class ModelsDialog(QDialog):
+class ModelsDialog(QWidget):
+    """Список моделей. Живёт на вкладке настроек."""
+
     def __init__(
         self,
         service: ApplicationService,
@@ -196,9 +198,6 @@ class ModelsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._service = service
-        self.setWindowTitle("Модели")
-        self.setModal(True)
-        self.resize(460, 420)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 14)
@@ -233,11 +232,6 @@ class ModelsDialog(QDialog):
         row.addWidget(edit)
         row.addWidget(delete)
         layout.addLayout(row)
-
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(self.reject)
-        close.accepted.connect(self.accept)
-        layout.addWidget(close)
         self._reload()
 
     def _reload(self) -> None:

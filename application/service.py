@@ -17,6 +17,7 @@ from uuid import uuid4
 import domain
 import file_edit
 from application.command_rules import command_spans
+from application.master_password import MasterPassword
 from application.terminal_mcp import (
     TOOL_NAME,
     INTERACTIVE_REASON,
@@ -123,6 +124,7 @@ class ApplicationService:
         command_allow=None,
         lounge_store=None,
         command_rules=None,
+        mcp_settings=None,
     ) -> None:
         self._driver_factory = driver_factory
         self._catalog = catalog
@@ -131,6 +133,8 @@ class ApplicationService:
         self._journal = journal
         self._command_allow = command_allow
         self._command_rules = command_rules
+        self._mcp_settings = mcp_settings
+        self._master = MasterPassword()
         self._lounge_store = lounge_store
         self._lounge_tabs: List[domain.LoungeTab] = []
         self._lounge_command: Dict[str, domain.SessionId] = {}
@@ -586,6 +590,25 @@ class ApplicationService:
         if driver is None or not hasattr(driver, "preview_edit"):
             raise file_edit.FileEditError("Эта сессия не умеет менять файлы")
         return driver
+
+    # --- мастер-пароль журнала -------------------------------------------
+
+    def has_master_password(self) -> bool:
+        return self._master.ready()
+
+    def set_master_password(self, password: str, confirmation: str) -> None:
+        """Первый ввод за запуск. Хеш пароля сравнивается с хешем подтверждения."""
+        self._master.establish(password, confirmation)
+
+    def master_password(self) -> str:
+        """Пароль для журналов без пароля подключения. Перед выдачей хеш сверяется."""
+        return self._master.reveal()
+
+    def prove_master_password(self) -> None:
+        self._master.prove()
+
+    def forget_unproven_master_password(self) -> None:
+        self._master.forget_unproven()
 
     # --- сценарии ---------------------------------------------------------
 
@@ -1191,6 +1214,42 @@ class ApplicationService:
                 return self._mcp_endpoint
             self._mcp_server = server
         endpoint = server.start()
+        with self._lock:
+            self._mcp_endpoint = endpoint
+        return endpoint
+
+    def mcp_listen(self) -> tuple:
+        """Сохранённые IP и текст портов. Пока файл не записан — 127.0.0.1 и 47321-47340."""
+        settings = self._mcp_settings
+        if settings is None:
+            from mcp_host import DEFAULT_MCP_HOST, DEFAULT_MCP_PORTS
+
+            return DEFAULT_MCP_HOST, DEFAULT_MCP_PORTS
+        return settings.load()
+
+    def update_mcp_listen(self, host: str, ports: tuple, ports_text: str) -> str:
+        """Занимает новый адрес MCP и запоминает его. Уже слушающий тот же адрес не перезапускается."""
+        server = self._mcp_server
+        if server is None or not hasattr(server, "rebind"):
+            raise RuntimeError("MCP-сервер не подключён")
+        current_host, current_ports = server.listen()
+        if server.running() and current_host == host and tuple(current_ports) == tuple(ports):
+            endpoint = server.endpoint
+        else:
+            try:
+                endpoint = server.rebind(host, ports)
+            except OSError as exc:
+                restored = ""
+                try:
+                    restored = server.rebind(current_host, current_ports)
+                except OSError:
+                    restored = ""
+                with self._lock:
+                    self._mcp_endpoint = restored
+                message = str(exc) or "Не удалось занять порт MCP"
+                raise OSError(message) from exc
+        if self._mcp_settings is not None:
+            self._mcp_settings.save(host, ports_text)
         with self._lock:
             self._mcp_endpoint = endpoint
         return endpoint

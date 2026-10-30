@@ -326,8 +326,6 @@ class ChainDialogTests(unittest.TestCase):
             dialog.terminal_combo.findData("ssh_over_ssh")
         )
         dialog.name_edit.setText("цепочка")
-        dialog.password_edit.setText("journal")
-        dialog.confirm_edit.setText("journal")
         dialog._add_hop.click()
         QApplication.processEvents()
         dialog._ok_button.click()

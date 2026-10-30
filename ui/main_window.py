@@ -60,8 +60,8 @@ from ui.general_chat import GENERAL_CHAT_ID, GENERAL_CHAT_TITLE, GeneralChatPage
 from ui.edit_dialog import FileEditDialog
 from ui.icons import gear_icon, paste_icon, paste_run_icon
 from ui.session_settings import SessionSettingsDialog
-from ui.models_dialog import ModelsDialog
-from ui.rules_dialog import PatternDialog, RulesDialog
+from ui.rules_dialog import PatternDialog
+from ui.settings_dialog import SettingsDialog
 from ui.styles import STYLESHEET, TextFormats, build_text_formats
 from ui.hostkey import QtHostKeyVerifier
 
@@ -473,23 +473,13 @@ class MainWindow(QMainWindow):
         self.new_button.clicked.connect(self._on_create_session)
         layout.addWidget(self.new_button)
 
-        self.models_button = QPushButton("Модели")
-        self.models_button.setObjectName("secondaryButton")
-        self.models_button.setToolTip(
-            "Сохранённые подключения к моделям.\n"
-            "Перед записью программа проверяет, что сервер знает эту модель."
+        self.settings_button = QPushButton("Настройки")
+        self.settings_button.setObjectName("secondaryButton")
+        self.settings_button.setToolTip(
+            "Модели, правила команд и адрес MCP."
         )
-        self.models_button.clicked.connect(self._on_models)
-        layout.addWidget(self.models_button)
-
-        self.rules_button = QPushButton("Правила")
-        self.rules_button.setObjectName("secondaryButton")
-        self.rules_button.setToolTip(
-            "Шаблоны команд, которые выполняются без вопроса.\n"
-            "У linux/macOS, Windows и other свои списки."
-        )
-        self.rules_button.clicked.connect(self._on_rules)
-        layout.addWidget(self.rules_button)
+        self.settings_button.clicked.connect(self._on_settings)
+        layout.addWidget(self.settings_button)
 
         self.group_button = QPushButton("Создать группу")
         self.group_button.setObjectName("secondaryButton")
@@ -990,12 +980,8 @@ class MainWindow(QMainWindow):
             return "  ·  модель"
         return f"  ·  {profile.name}"
 
-    def _on_rules(self) -> None:
-        RulesDialog(self._service, self).exec()
-
-    def _on_models(self) -> None:
-        dialog = ModelsDialog(self._service, self)
-        dialog.exec()
+    def _on_settings(self) -> None:
+        SettingsDialog(self._service, self).exec()
         self._reload_sessions()
         self._update_header()
         self._sync_chat(self._active_session_id)
