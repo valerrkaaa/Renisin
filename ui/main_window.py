@@ -45,7 +45,12 @@ import domain
 from application import ApplicationService
 from application.service import LlmUnavailable
 from application.command_rules import fully_allowed
-from application.terminal_mcp import CommandAnswer, CommandAsk, lounge_tab_id
+from application.terminal_mcp import (
+    CommandAnswer,
+    CommandAsk,
+    finished_text,
+    lounge_tab_id,
+)
 from shell_takeover import looks_like_secret_prompt
 from ui.chat_pane import ChatPane
 from ui.command_input import CommandInput, command_needs_more
@@ -385,6 +390,7 @@ class MainWindow(QMainWindow):
     _chat_done = Signal(object, object)
     _lounge_done = Signal(str, object)
     _mcp_ask = Signal(object)
+    _review_done = Signal(str, str, str, object)
 
     def __init__(self, service: ApplicationService) -> None:
         super().__init__()
@@ -396,6 +402,8 @@ class MainWindow(QMainWindow):
         self._lounge_wait: Set[str] = set()
         self._lounge_runs: Dict[domain.SessionId, str] = {}
         self._mcp_pending: Dict[domain.SessionId, tuple] = {}
+        self._reviewing: Dict[str, tuple] = {}
+        self._hidden_terminal: Set[domain.SessionId] = set()
         self._panels: Dict[domain.SessionId, QScrollArea] = {}
         self._layouts: Dict[domain.SessionId, QVBoxLayout] = {}
         self._panel_ready: Set[domain.SessionId] = set()
@@ -414,7 +422,9 @@ class MainWindow(QMainWindow):
         self._completion_ready.connect(self._on_completion_ready)
         self._chat_done.connect(self._on_chat_done)
         self._mcp_ask.connect(self._present_mcp)
+        self._review_done.connect(self._on_review_done)
         self.chat_pane.command_decided.connect(self._on_command_decided)
+        self.chat_pane.output_decided.connect(self._on_output_decided)
         self._lounge.command_decided.connect(self._on_command_decided)
         self.chat_pane.rule_requested.connect(self._on_add_command_rule)
         self._lounge.rule_requested.connect(self._on_add_command_rule)
@@ -2121,6 +2131,19 @@ class MainWindow(QMainWindow):
             if active == sid:
                 self._update_input_state()
             return
+        if sid in self._hidden_terminal and event.event_type in (
+            domain.EventType.COMMAND_SENT,
+            domain.EventType.OUTPUT_CHUNK,
+            domain.EventType.ERROR,
+            domain.EventType.COMMAND_FINISHED,
+        ):
+            self._feed_hidden_command(event)
+            if event.event_type == domain.EventType.COMMAND_FINISHED:
+                self._dismissed_commands.discard(sid)
+                if active == sid:
+                    self._update_input_state()
+                self._reload_sessions()
+            return
         if sid not in self._layouts:
             if event.event_type in (
                 domain.EventType.COMMAND_SENT,
@@ -2431,7 +2454,7 @@ class MainWindow(QMainWindow):
         )
         if not enabled:
             return
-        self._on_command_decided(request_id, "run", "")
+        self._on_command_decided(request_id, "run", "", auto=True)
 
     def _on_add_command_rule(self, request_id: str) -> None:
         found = None
@@ -2470,22 +2493,112 @@ class MainWindow(QMainWindow):
         self.chat_pane.update_command_preview(request_id, parts, spans)
         self._lounge.update_command_preview(request_id, parts, spans)
 
-    def _on_command_decided(self, request_id: str, action: str, reason: str) -> None:
+    def _on_command_decided(
+        self, request_id: str, action: str, reason: str, auto: bool = False
+    ) -> None:
         found = None
         for session_id, item in list(self._mcp_pending.items()):
             if item[0].request_id == request_id:
                 found = self._mcp_pending.pop(session_id)
                 break
-        self.chat_pane.clear_command_request()
-        self._lounge.clear_command_request()
+        if found is None:
+            found = self._reviewing.pop(request_id, None)
         if found is None:
             return
         prompt = found[0]
+        if (
+            action == "run"
+            and not auto
+            and not lounge_tab_id(prompt.origin_id)
+            and self.chat_pane.review_before_send()
+        ):
+            self._reviewing[request_id] = found
+            self._hidden_terminal.add(prompt.session_id)
+            self.chat_pane.show_command_running(request_id)
+            self._start_command_review(prompt)
+            return
+        self._hidden_terminal.discard(prompt.session_id)
+        self.chat_pane.clear_command_request()
+        self._lounge.clear_command_request()
         self._record_tool_outcome(prompt, action, reason)
         tab_id = lounge_tab_id(prompt.origin_id)
         if tab_id and action in ("run", "always"):
             self._lounge_runs[prompt.session_id] = tab_id
         found[1](CommandAnswer(action, reason))
+        if (
+            prompt.session_id in self._chat_wait
+            and prompt.session_id == self._active_session_id
+        ):
+            self.chat_pane.set_thinking(True)
+
+    def _start_command_review(self, prompt: CommandAsk) -> None:
+        request_id = prompt.request_id
+        session_id = prompt.session_id
+        command = prompt.command
+
+        def work() -> None:
+            try:
+                model_text, output, code = self._service.capture_mcp_output(
+                    session_id, command
+                )
+            except Exception as exc:
+                model_text = str(exc) or "не удалось выполнить команду"
+                output = ""
+                code = None
+            self._review_done.emit(request_id, model_text, output, code)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _feed_hidden_command(self, event: domain.TranscriptEvent) -> None:
+        request_id = ""
+        for item in self._reviewing.values():
+            if item[0].session_id == event.session_id:
+                request_id = item[0].request_id
+                break
+        if not request_id:
+            return
+        if event.event_type == domain.EventType.OUTPUT_CHUNK:
+            self.chat_pane.note_command_output(
+                request_id, event.payload, event.persist
+            )
+        elif event.event_type == domain.EventType.ERROR and event.payload:
+            self.chat_pane.note_command_output(
+                request_id, event.payload + "\n", False
+            )
+
+    def _on_review_done(
+        self, request_id: str, model_text: str, output: str, code: object
+    ) -> None:
+        if request_id not in self._reviewing:
+            return
+        self.chat_pane.show_command_result(request_id, output, model_text, code)
+
+    def _on_output_decided(
+        self,
+        request_id: str,
+        text: str,
+        edited: bool,
+        model_text: str,
+        code: object,
+    ) -> None:
+        found = self._reviewing.pop(request_id, None)
+        if found is None:
+            return
+        prompt = found[0]
+        self._hidden_terminal.discard(prompt.session_id)
+        self.chat_pane.clear_command_request()
+        self._lounge.clear_command_request()
+        if edited:
+            exit_code = code if isinstance(code, int) or code is None else None
+            body = (
+                "данные отредактированы пользователем, вероятно чтобы скрыть "
+                "чувствительные данные\n"
+                + finished_text(exit_code, text)
+            )
+        else:
+            body = model_text
+        self._record_tool_outcome(prompt, "run", "")
+        found[1](CommandAnswer("deliver", body=body))
         if (
             prompt.session_id in self._chat_wait
             and prompt.session_id == self._active_session_id

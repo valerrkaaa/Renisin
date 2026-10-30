@@ -327,6 +327,17 @@ QLabel#chainRoute {
     color: #e4e4e7;
     font-weight: 600;
 }
+QPlainTextEdit#commandCapture {
+    background: #121318;
+    color: #ececf1;
+    border: 1px solid #2e2f36;
+    border-radius: 8px;
+    padding: 8px;
+}
+QPlainTextEdit#commandCapture:disabled {
+    background: #121318;
+    color: #ececf1;
+}
 QFrame#commandCard {
     background: transparent;
     border: none;

@@ -64,10 +64,14 @@ class CommandAsk:
 
 @dataclass(frozen=True)
 class CommandAnswer:
-    """action: run, always, reject, reject_reason."""
+    """action: run, always, reject, reject_reason, deliver.
+
+    deliver — команда уже выполнена, модели уходит body.
+    """
 
     action: str
     reason: str = ""
+    body: str = ""
 
 
 def normalize_command(command: str) -> str:

@@ -446,6 +446,19 @@ class McpCommandTests(unittest.TestCase):
         )
         self.assertNotIn("rm y", driver.sent)
 
+    def test_deliver_returns_body_without_running_again(self) -> None:
+        service, driver, profiles = _world()
+        info = _session(service, profiles)
+        body = (
+            "данные отредактированы пользователем, вероятно чтобы скрыть "
+            "чувствительные данные\nвыполнено, код 0\nскрыто"
+        )
+        gate = _Gate(CommandAnswer("deliver", body=body))
+        service.set_command_approver(gate.ask)
+        result = service.run_mcp_command(info.session_id, "посмотреть", "ls")
+        self.assertEqual(result, body)
+        self.assertNotIn("ls", driver.sent)
+
     def test_run_returns_output_and_always_skips_the_next_ask(self) -> None:
         allow = _Allow()
         service, driver, profiles = _world(allow=allow)
@@ -1106,6 +1119,98 @@ class ChatCardTests(unittest.TestCase):
         labels = pane.findChildren(QLabel, "shellCode")
         self.assertEqual(labels[-1].text(), "Команда:\napt install\napt update")
         pane.close()
+
+    def test_manual_approval_keeps_output_for_redaction(self) -> None:
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QApplication, QFrame, QPlainTextEdit, QPushButton
+
+        from ui.chat_pane import ChatPane
+
+        pane = ChatPane(QFont("Consolas"))
+        pane.resize(500, 500)
+        pane.show()
+        QApplication.processEvents()
+        delivered = []
+        pane.output_decided.connect(lambda *args: delivered.append(args))
+        pane.show_command_request("id-1", "посмотреть", "ls")
+        buttons = {button.text(): button for button in pane.findChildren(QPushButton)}
+        buttons["Выполнить"].click()
+        QApplication.processEvents()
+        pane.show_command_running("id-1")
+        pane.note_command_output("id-1", "token=secret\n", False)
+        pane.show_command_result(
+            "id-1", "token=secret\n", "выполнено, код 0\ntoken=secret\n", 0
+        )
+        QApplication.processEvents()
+        edit = pane.findChild(QPlainTextEdit, "commandCapture")
+        assert edit is not None
+        self.assertFalse(edit.isEnabled())
+        self.assertIn("token=secret", edit.toPlainText())
+        card = pane.findChild(QFrame, "commandRequest")
+        assert card is not None
+        card_buttons = {
+            button.text(): button for button in card.findChildren(QPushButton)
+        }
+        self.assertTrue(card_buttons["Отправить"].isEnabled())
+        self.assertTrue(card_buttons["Обезличить"].isVisible())
+        card_buttons["Обезличить"].click()
+        QApplication.processEvents()
+        self.assertTrue(edit.isEnabled())
+        edit.setPlainText("token=\n")
+        card_buttons["Отправить"].click()
+        self.assertEqual(delivered[0][0], "id-1")
+        self.assertEqual(delivered[0][1], "token=\n")
+        self.assertTrue(delivered[0][2])
+        self.assertEqual(delivered[0][3], "выполнено, код 0\ntoken=secret\n")
+        self.assertEqual(delivered[0][4], 0)
+        pane.close()
+
+    def test_review_checkbox_sends_the_answer_immediately_when_off(self) -> None:
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
+
+        from application.terminal_mcp import CommandAsk
+        from ui.chat_pane import ChatPane
+        from ui.main_window import MainWindow
+
+        pane = ChatPane(QFont("Consolas"))
+        box = pane.findChild(QCheckBox, "reviewOutput")
+        assert box is not None
+        self.assertTrue(box.isChecked())
+        self.assertTrue(pane.review_before_send())
+        box.setChecked(False)
+        self.assertFalse(pane.review_before_send())
+        pane.close()
+
+        service, _driver, profiles = _world()
+        info = _session(service, profiles)
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        window.chat_pane.findChild(QCheckBox, "reviewOutput").setChecked(False)
+        answers = []
+        prompt = CommandAsk(
+            request_id="id-off",
+            session_id=info.session_id,
+            intent="список",
+            command="ls",
+            parts=("ls",),
+        )
+        window._mcp_pending[info.session_id] = (prompt, answers.append)
+        window.chat_pane.show_command_request("id-off", "список", "ls")
+        QApplication.processEvents()
+        run = next(
+            button
+            for button in window.chat_pane.findChildren(QPushButton)
+            if button.text() == "Выполнить"
+        )
+        run.click()
+        QApplication.processEvents()
+        self.assertEqual([item.action for item in answers], ["run"])
+        self.assertNotIn("id-off", window._reviewing)
+        self.assertIsNone(window.chat_pane._request_card)
+        window.close()
 
     def test_add_rule_keeps_the_request_and_refreshes_highlight(self) -> None:
         from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTextEdit

@@ -1630,9 +1630,14 @@ class ApplicationService:
             return self._execute_mcp_command(session_id, text)
         if action == "run":
             return self._execute_mcp_command(session_id, text)
+        if action == "deliver":
+            return answer.body.strip() or refusal_reason("пустой вывод")
         return refusal()
 
-    def _execute_mcp_command(self, session_id: domain.SessionId, command: str) -> str:
+    def capture_mcp_output(
+        self, session_id: domain.SessionId, command: str
+    ) -> tuple:
+        """Выполнить команду. Вернуть текст для модели, сырой вывод и код."""
         watch = _McpWatch()
         with self._lock:
             self._mcp_watch[session_id] = watch
@@ -1640,23 +1645,28 @@ class ApplicationService:
             try:
                 self.send_command(session_id, command)
             except Exception as exc:
-                return refusal_reason(str(exc) or "не удалось запустить команду")
+                reason = refusal_reason(str(exc) or "не удалось запустить команду")
+                return reason, "", None
             if not self._wait_mcp(watch, 600):
                 self.cancel_command(session_id)
                 watch.done.wait(5)
             self._raise_if_chat_stopped()
+            output = watch.output if watch.output.strip() else watch.live
             if watch.refusal:
-                return refusal_reason(watch.refusal)
+                return refusal_reason(watch.refusal), output, watch.code
             if watch.interactive or watch.shell:
                 if watch.shell and not watch.interactive:
                     self._exit_spawned_shell(session_id)
-                return refusal_reason(INTERACTIVE_REASON)
-            output = watch.output if watch.output.strip() else watch.live
-            return finished_text(watch.code, output)
+                return refusal_reason(INTERACTIVE_REASON), output, watch.code
+            return finished_text(watch.code, output), output, watch.code
         finally:
             with self._lock:
                 if self._mcp_watch.get(session_id) is watch:
                     self._mcp_watch.pop(session_id, None)
+
+    def _execute_mcp_command(self, session_id: domain.SessionId, command: str) -> str:
+        model_text, _output, _code = self.capture_mcp_output(session_id, command)
+        return model_text
 
     def _raise_if_chat_stopped(self) -> None:
         stop = domain.current_chat_stop()

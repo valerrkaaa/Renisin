@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QApplication,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -298,6 +299,7 @@ class _CommandRequest(QFrame):
 
     decided = Signal(str, str, str)
     rule_requested = Signal(str)
+    output_decided = Signal(str, str, bool, str, object)
 
     def __init__(
         self,
@@ -382,7 +384,48 @@ class _CommandRequest(QFrame):
         reason_layout.addWidget(submit)
         self._reason_row.setVisible(False)
         layout.addWidget(self._reason_row)
-        self._buttons = (run, add_rule, reject, explain, submit)
+
+        self._output = QPlainTextEdit()
+        self._output.setObjectName("commandCapture")
+        self._output.setFont(mono)
+        self._output.setReadOnly(False)
+        self._output.setEnabled(False)
+        self._output.setPlaceholderText("Вывод команды")
+        self._output.setMinimumHeight(96)
+        self._output.setMaximumHeight(280)
+        self._output.setVisible(False)
+        layout.addWidget(self._output)
+        self._captured = ""
+        self._model_text = ""
+        self._exit_code: object = None
+        self._editable = False
+        self._live = ""
+
+        review = QHBoxLayout()
+        review.setSpacing(8)
+        send = QPushButton("Отправить")
+        send.setObjectName("auxButton")
+        send.setToolTip("Передать модели вывод команды")
+        send.clicked.connect(self._send_output)
+        redact = QPushButton("Обезличить")
+        redact.setObjectName("auxButton")
+        redact.setToolTip("Разрешить правку вывода перед отправкой")
+        redact.clicked.connect(self._redact_output)
+        review_reject = QPushButton("Отклонить по причине")
+        review_reject.setObjectName("auxButton")
+        review_reject.setToolTip("Отказать и передать модели причину")
+        review_reject.clicked.connect(self._show_reason)
+        review.addWidget(send)
+        review.addWidget(redact)
+        review.addWidget(review_reject)
+        review.addStretch(1)
+        self._review_row = QWidget()
+        self._review_row.setLayout(review)
+        self._review_row.setVisible(False)
+        layout.addWidget(self._review_row)
+        self._approval = (run, add_rule, reject, explain)
+        self._review_buttons = (send, redact, review_reject, submit)
+        self._buttons = self._approval + (submit,)
 
     def request_id(self) -> str:
         return self._request_id
@@ -423,9 +466,62 @@ class _CommandRequest(QFrame):
             return
         self._choose("reject_reason", text)
 
-    def _choose(self, action: str, reason: str) -> None:
-        for button in self._buttons:
+    def show_running(self) -> None:
+        """Команда пошла в терминал. Вывод копится в этом блоке."""
+        for button in self._approval:
+            button.hide()
+        self._output.setVisible(True)
+        self._output.setEnabled(False)
+        self._output.setPlainText("")
+        self._review_row.setVisible(False)
+        self._editable = False
+        self._live = ""
+
+    def note_output(self, text: str, replace: bool) -> None:
+        if self._editable:
+            return
+        if replace:
+            self._live = text
+        else:
+            self._live += text
+        self._output.setPlainText(self._live)
+        cursor = self._output.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._output.setTextCursor(cursor)
+
+    def show_result(self, output: str, model_text: str, code: object) -> None:
+        self._model_text = model_text
+        self._exit_code = code
+        shown = output if output.strip() else model_text
+        self._captured = shown
+        if not self._editable:
+            self._output.setPlainText(shown)
+        self._output.setVisible(True)
+        self._output.setEnabled(False)
+        self._review_row.setVisible(True)
+        for button in self._review_buttons:
+            button.setEnabled(True)
+            button.show()
+
+    def _redact_output(self) -> None:
+        self._editable = True
+        self._output.setEnabled(True)
+        self._output.setFocus()
+
+    def _send_output(self) -> None:
+        text = self._output.toPlainText()
+        edited = text != self._captured
+        for button in self._review_buttons:
             button.setEnabled(False)
+        self._output.setEnabled(False)
+        self.output_decided.emit(
+            self._request_id, text, edited, self._model_text, self._exit_code
+        )
+
+    def _choose(self, action: str, reason: str) -> None:
+        for button in self._buttons + self._review_buttons:
+            button.setEnabled(False)
+        self._output.setEnabled(False)
         self._reason.setReadOnly(True)
         self.decided.emit(self._request_id, action, reason)
 
@@ -439,6 +535,7 @@ class ChatPane(QWidget):
     apply_edit = Signal(str, str, str)
     reset_requested = Signal()
     command_decided = Signal(str, str, str)
+    output_decided = Signal(str, str, bool, str, object)
     rule_requested = Signal(str)
     limit_changed = Signal(int)
 
@@ -462,6 +559,14 @@ class ChatPane(QWidget):
             "выполнять автоматически при полном совпадении с паттернами"
         )
         head.addWidget(self._auto_run)
+        self._review_output = QCheckBox("Просмотр")
+        self._review_output.setObjectName("reviewOutput")
+        self._review_output.setChecked(True)
+        self._review_output.setToolTip(
+            "Показывать вывод команды перед отправкой модели.\n"
+            "Если выключено, ответ уходит сразу."
+        )
+        head.addWidget(self._review_output)
         self._context = QLabel("")
         self._context.setObjectName("chatContext")
         head.addWidget(self._context)
@@ -634,6 +739,9 @@ class ChatPane(QWidget):
     def auto_run_on_match(self) -> bool:
         return self._auto_run.isChecked()
 
+    def review_before_send(self) -> bool:
+        return self._review_output.isChecked()
+
     def set_context(self, text: str) -> None:
         self._context.setText(text)
         self._context.setVisible(bool(text))
@@ -690,6 +798,7 @@ class ChatPane(QWidget):
             request_id, intent, command, self._mono, parts=parts, spans=spans
         )
         card.decided.connect(self.command_decided.emit)
+        card.output_decided.connect(self.output_decided.emit)
         card.rule_requested.connect(self.rule_requested.emit)
         self._request_card = card
         self._messages.insertWidget(self._messages.count() - 1, card)
@@ -706,6 +815,29 @@ class ChatPane(QWidget):
         if card is None or card.request_id() != request_id:
             return
         card.set_preview(parts, spans)
+
+    def show_command_running(self, request_id: str) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.show_running()
+        self._scroll_bottom()
+
+    def note_command_output(self, request_id: str, text: str, replace: bool) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.note_output(text, replace)
+        self._scroll_bottom()
+
+    def show_command_result(
+        self, request_id: str, output: str, model_text: str, code: object
+    ) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.show_result(output, model_text, code)
+        self._scroll_bottom()
 
     def clear_command_request(self) -> None:
         card = self._request_card
