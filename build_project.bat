@@ -8,7 +8,7 @@ cd /d "%~dp0"
 REM ==== Настройки ====
 set "VENV_DIR=venv"
 set "ENTRY_POINT=main.py"
-set "APP_NAME=vterminal"
+set "APP_NAME=Renisin"
 
 REM ==== Проверка точки входа ====
 if not exist "%ENTRY_POINT%" (
@@ -16,7 +16,7 @@ if not exist "%ENTRY_POINT%" (
     exit /b 1
 )
 
-set "APP_ICON=assets\icons\vterminal.ico"
+set "APP_ICON=assets\icons\Renisin.ico"
 if not exist "%APP_ICON%" (
     echo [ERROR] Не найдена иконка: %APP_ICON%
     exit /b 1

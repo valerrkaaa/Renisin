@@ -87,7 +87,7 @@ class ChatStop:
 
 
 _chat_stop: contextvars.ContextVar[Optional[ChatStop]] = contextvars.ContextVar(
-    "vterminal_chat_stop",
+    "renisin_chat_stop",
     default=None,
 )
 

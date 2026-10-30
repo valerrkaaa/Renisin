@@ -479,7 +479,7 @@ class MainWindow(QMainWindow):
     # --- UI ---------------------------------------------------------------
 
     def _setup_ui(self) -> None:
-        self.setWindowTitle("vterminal")
+        self.setWindowTitle("Renisin")
         self.resize(1180, 760)
         self.setMinimumSize(860, 520)
         self._sidebar_width = 200

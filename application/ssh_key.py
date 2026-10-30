@@ -46,7 +46,7 @@ def load_private_key(path: str, passphrase: Optional[str]):
 
 
 def public_line(key) -> str:
-    return f"{key.get_name()} {key.get_base64()} vterminal"
+    return f"{key.get_name()} {key.get_base64()} Renisin"
 
 
 def authorized_keys_command(line: str) -> str:

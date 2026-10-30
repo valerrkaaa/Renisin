@@ -51,7 +51,7 @@ def _bundle_dir() -> str:
 def app_icon() -> QIcon:
     """Иконка окна, панели задач и трея из assets/icons."""
     root = os.path.join(_bundle_dir(), "assets", "icons")
-    icon = QIcon(os.path.join(root, "vterminal.ico"))
+    icon = QIcon(os.path.join(root, "Renisin.ico"))
     for name, side in (
         ("favicon-16x16.png", 16),
         ("favicon-32x32.png", 32),
@@ -69,7 +69,7 @@ def _install_tray(app: QApplication, window, icon: QIcon) -> None:
     if not QSystemTrayIcon.isSystemTrayAvailable():
         return
     tray = QSystemTrayIcon(icon, window)
-    tray.setToolTip("vterminal")
+    tray.setToolTip("Renisin")
     menu = QMenu()
     open_action = menu.addAction("Открыть")
     open_action.triggered.connect(lambda: _present(window))
@@ -100,7 +100,7 @@ def get_data_dir() -> str:
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
     else:
         base = os.path.expanduser("~/.local/share")
-    return os.path.join(base, "vibe_terminal")
+    return os.path.join(base, "Renisin")
 
 
 def main() -> int:
@@ -108,10 +108,10 @@ def main() -> int:
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "vibe_terminal.vterminal"
+            "Renisin.Renisin"
         )
     app = QApplication(sys.argv)
-    app.setApplicationName("vterminal")
+    app.setApplicationName("Renisin")
     app.installEventFilter(ButtonLocalizer(app))
     icon = app_icon()
     app.setWindowIcon(icon)

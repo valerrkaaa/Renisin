@@ -65,8 +65,8 @@ class Design:
 
 
 PRESETS: dict[str, Design] = {
-    "vterminal": Design(
-        preset="vterminal",
+    "Renisin": Design(
+        preset="Renisin",
         canvas="#1f1f1f",
         sidebar="#181818",
         activity="#101113",
@@ -417,9 +417,9 @@ def _request_card(on_action) -> QFrame:
 class TemplateWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("vterminal — набросок оформления")
+        self.setWindowTitle("Renisin — набросок оформления")
         self.resize(1180, 780)
-        self._design = PRESETS["vterminal"]
+        self._design = PRESETS["Renisin"]
         self._colors: dict[str, ColorField] = {}
         self._lock = False
 

@@ -18,7 +18,7 @@ class ChatDialect:
 
 def dialect_for(kind: domain.LlmApiKind) -> ChatDialect:
     if kind == domain.LlmApiKind.OPENROUTER:
-        return ChatDialect(extra_headers={"X-Title": "vterminal"})
+        return ChatDialect(extra_headers={"X-Title": "Renisin"})
     return ChatDialect(extra_headers={})
 
 

@@ -330,7 +330,7 @@ class ClientTests(unittest.TestCase):
                 "m-2", "облако", base, "demo",
                 api_key="key", api_kind=domain.LlmApiKind.OPENAI,
             ))
-            self.assertEqual(seen, ["vterminal", None])
+            self.assertEqual(seen, ["Renisin", None])
         finally:
             server.shutdown()
             server.server_close()

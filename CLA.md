@@ -1,6 +1,6 @@
 # Broad Contributor License Agreement
 
-Проект: vterminal  
+Проект: Renisin  
 Правообладатель («Хранитель»): Valery Andreevich Glushchenko
 Контакт: valerrkaaa3@gmail.com
 
@@ -10,7 +10,7 @@
 
 ## 1. Определения
 
-«Проект» — программное обеспечение vterminal и сопутствующие материалы в репозитории, который указал Хранитель при настройке CLA.
+«Проект» — программное обеспечение Renisin и сопутствующие материалы в репозитории, который указал Хранитель при настройке CLA.
 
 «Вклад» — код, документация и иные материалы, которые Участник передаёт в Проект, включая pull request, патч, коммит и комментарий в запросе на изменение, как до подписания этого соглашения, так и после, пока соглашение действует для данной учётной записи.
 
@@ -79,8 +79,8 @@
 
 # Broad Contributor License Agreement (English translation)
 
-Project: vterminal
-Maintainer: Валерий
+Project: Renisin
+Maintainer: Valery Andreevich Glushchenko 
 Contact: valerrkaaa3@gmail.com
 
 The Russian text is the operative agreement. This English text is a translation. If the two differ, the Russian text prevails.
@@ -89,7 +89,7 @@ Signing through CLA Assistant with the GitHub account that submits the Contribut
 
 ## 1. Definitions
 
-"Project" means the vterminal software and related materials in the repository the Maintainer configured for the CLA.
+"Project" means the Renisin software and related materials in the repository the Maintainer configured for the CLA.
 
 "Contribution" means code, documentation, and other materials submitted to the Project, including a pull request, patch, commit, and a comment on a change request, whether submitted before or after signature, for as long as this agreement applies to that account.
 

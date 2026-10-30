@@ -70,7 +70,7 @@ class KeyFileTests(unittest.TestCase):
             key = load_private_key(path, None)
             line = public_line(key)
             self.assertTrue(line.startswith("ssh-ed25519 "))
-            self.assertTrue(line.endswith(" vterminal"))
+            self.assertTrue(line.endswith(" Renisin"))
             with open(path + ".pub", encoding="utf-8") as handle:
                 self.assertEqual(handle.read().strip(), line)
             command = authorized_keys_command(line)
@@ -304,7 +304,7 @@ class ServiceKeyTests(unittest.TestCase):
 
         original_line = sshmod.public_line
         original_install = sshmod.install_authorized_key
-        sshmod.public_line = lambda key: "ssh-ed25519 AAAA vterminal"
+        sshmod.public_line = lambda key: "ssh-ed25519 AAAA Renisin"
         installed = []
         sshmod.install_authorized_key = lambda client, line: installed.append(line)
         try:
@@ -315,7 +315,7 @@ class ServiceKeyTests(unittest.TestCase):
             self.assertIsNotNone(client)
             self.assertEqual(resolved.auth_method, domain.SSHAuthMethod.PRIVATE_KEY)
             self.assertEqual(resolved.private_key_path, r"C:\keys\id")
-            self.assertEqual(installed, ["ssh-ed25519 AAAA vterminal"])
+            self.assertEqual(installed, ["ssh-ed25519 AAAA Renisin"])
             self.assertEqual(
                 calls,
                 [

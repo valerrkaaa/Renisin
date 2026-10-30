@@ -226,11 +226,11 @@ def _dispatch(service, method: str, params, session_id: Optional[str]) -> tuple:
         version = str(params.get("protocolVersion") or "2025-03-26")
         if version not in ("2024-11-05", "2025-03-26", "2025-06-18"):
             version = "2025-03-26"
-        name = "vterminal"
+        name = "Renisin"
         if session_id:
             info = service.get_session(session_id) if hasattr(service, "get_session") else None
             title = info.name if info is not None else session_id
-            name = f"vterminal: {title}"
+            name = f"Renisin: {title}"
         return (
             {
                 "protocolVersion": version,
