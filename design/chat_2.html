@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Чат с ИИ</title>
+<style>
+  :root{
+    /* палитра из исходного файла — без новых цветов */
+    --bg:#1f1f1f;
+    --sidebar-bg:#181818;
+    --surface:#262626;
+    --activity:#101113;
+    --text:#e4e4e7;
+    --muted:#8b8d97;
+    --faint:#6b6d78;
+    --border:#2e2f36;
+    --hover:#222328;
+    --active-bg:#1f2440;
+    --accent:#2f318f;
+    --accent-hover:#5d5ea8;
+    --radius:6px;
+    --radius-lg:10px;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{height:100%;color-scheme:dark;}
+
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-size:14px;
+    color:var(--text);
+    background:var(--bg);
+  }
+
+  :where(button,select,input,textarea):focus-visible{
+    outline:2px solid var(--accent-hover);
+    outline-offset:2px;
+  }
+
+  .pane{
+    max-width:800px;
+    height:100vh;
+    height:100dvh;
+    margin:0 auto;
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+    padding:14px 16px;
+  }
+
+  /* ---------- шапка ---------- */
+
+  .head{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-wrap:wrap;
+    padding:8px 10px 8px 14px;
+    border:1px solid var(--border);
+    border-radius:var(--radius-lg);
+    background:var(--surface);
+  }
+
+  .brand{display:flex;align-items:center;gap:9px;}
+
+  .logo{
+    width:9px;height:9px;border-radius:50%;
+    background:var(--accent);
+    box-shadow:0 0 0 3px var(--active-bg);
+  }
+
+  .head h1{
+    margin:0;
+    font-size:14px;
+    font-weight:600;
+    letter-spacing:.2px;
+  }
+
+  .grow{flex:1;}
+
+  .select-wrap{position:relative;display:inline-flex;align-items:center;}
+
+  select{
+    appearance:none;
+    -webkit-appearance:none;
+    padding:8px 30px 8px 12px;
+    border:1px solid var(--border);
+    border-radius:999px;
+    background:var(--bg);
+    color:var(--text);
+    font-family:inherit;
+    font-size:12.5px;
+    font-weight:600;
+    cursor:pointer;
+    transition:background .15s, border-color .15s;
+  }
+  select:hover{background:var(--hover);border-color:var(--accent-hover);}
+
+  .select-wrap .chev{
+    position:absolute;right:11px;pointer-events:none;color:var(--faint);
+  }
+
+  .check{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    padding:7px 11px 7px 9px;
+    border:1px solid var(--border);
+    border-radius:999px;
+    background:var(--bg);
+    color:var(--muted);
+    font-size:12.5px;
+    font-weight:500;
+    user-select:none;
+    cursor:pointer;
+    transition:color .15s, border-color .15s, background .15s;
+  }
+  .check:hover{border-color:var(--accent-hover);color:var(--text);}
+  .check:has(input:checked){
+    color:var(--text);
+    border-color:var(--accent);
+    background:var(--active-bg);
+  }
+
+  .check input{
+    appearance:none;
+    -webkit-appearance:none;
+    position:relative;
+    width:30px;height:17px;
+    margin:0;
+    border-radius:999px;
+    background:var(--hover);
+    border:1px solid var(--border);
+    cursor:pointer;
+    transition:background .18s, border-color .18s;
+  }
+  .check input::after{
+    content:"";
+    position:absolute;top:2px;left:2px;
+    width:11px;height:11px;border-radius:50%;
+    background:var(--faint);
+    transition:left .18s ease, background .18s;
+  }
+  .check input:checked{background:var(--accent);border-color:var(--accent);}
+  .check input:checked::after{left:15px;background:#fff;}
+
+  /* ---------- кнопки ---------- */
+
+  .aux, .usage{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    padding:8px 13px;
+    border:1px solid var(--border);
+    border-radius:999px;
+    background:var(--bg);
+    color:var(--text);
+    font-family:inherit;
+    font-size:12.5px;
+    font-weight:600;
+    cursor:pointer;
+    user-select:none;
+    transition:background .15s, border-color .15s, color .15s, transform .1s;
+  }
+  .aux:hover, .usage:hover{background:var(--hover);border-color:var(--accent-hover);}
+  .aux:active, .usage:active{transform:translateY(1px);}
+
+  .aux.primary{
+    background:var(--accent);
+    border-color:var(--accent);
+    color:#fff;
+  }
+  .aux.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+
+  .usage{
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:11.5px;
+    color:var(--muted);
+    letter-spacing:.2px;
+  }
+
+  .limit{width:88px;}
+
+  /* ---------- лента ---------- */
+
+  .thread{
+    flex:1;
+    overflow-y:auto;
+    scroll-behavior:smooth;
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+    padding:4px 4px 10px;
+  }
+
+  .thread::-webkit-scrollbar{width:10px;}
+  .thread::-webkit-scrollbar-track{background:transparent;}
+  .thread::-webkit-scrollbar-thumb{
+    background:var(--border);
+    border-radius:999px;
+    border:3px solid transparent;
+    background-clip:padding-box;
+  }
+  .thread::-webkit-scrollbar-thumb:hover{background:var(--accent-hover);background-clip:padding-box;}
+
+  .user{
+    align-self:flex-end;
+    max-width:min(78%,440px);
+    padding:10px 14px;
+    border-radius:14px 14px 4px 14px;
+    background:var(--active-bg);
+    border:1px solid var(--accent);
+    white-space:pre-wrap;
+    line-height:1.45;
+    animation:rise .22s ease both;
+  }
+
+  .assistant{
+    display:flex;
+    gap:10px;
+    align-items:flex-start;
+    padding:2px 0;
+    line-height:1.55;
+    white-space:pre-wrap;
+    animation:rise .22s ease both;
+  }
+  .assistant::before{
+    content:"✦";
+    flex:0 0 26px;
+    height:26px;
+    display:grid;
+    place-items:center;
+    border-radius:9px;
+    font-size:12px;
+    color:#fff;
+    background:var(--accent);
+    box-shadow:inset 0 0 0 1px var(--accent-hover);
+  }
+
+  @keyframes rise{
+    from{opacity:0;transform:translateY(6px);}
+    to{opacity:1;transform:none;}
+  }
+
+  /* ---------- карточка заметки ---------- */
+
+  .note{
+    border:1px solid var(--border);
+    border-radius:var(--radius-lg);
+    background:var(--surface);
+    overflow:hidden;
+    transition:border-color .15s, background .15s;
+    animation:rise .22s ease both;
+  }
+  .note:hover{border-color:var(--accent-hover);}
+
+  .note-head{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    width:100%;
+    padding:11px 13px 0;
+    background:none;
+    border:0;
+    color:inherit;
+    font-family:inherit;
+    text-align:left;
+    cursor:pointer;
+  }
+
+  .badge{
+    font-size:11px;
+    font-weight:600;
+    padding:3px 9px;
+    border-radius:999px;
+    letter-spacing:.2px;
+    white-space:nowrap;
+    border:1px solid var(--border);
+  }
+  .badge.ok{
+    color:var(--text);
+    background:var(--active-bg);
+    border-color:var(--accent);
+  }
+  .badge.bad{
+    color:var(--muted);
+    background:var(--bg);
+    border-color:var(--border);
+  }
+  .badge.wait{
+    color:var(--text);
+    background:var(--bg);
+    border-color:var(--accent-hover);
+  }
+
+  .note-mcp{font-size:12.5px;color:var(--faint);}
+
+  .note .chev{
+    margin-left:auto;
+    display:inline-flex;
+    color:var(--faint);
+    transition:transform .18s ease, color .15s;
+  }
+  .note-head:hover .chev{color:var(--muted);}
+  .note.open .chev{transform:rotate(90deg);}
+
+  .note-cmd{padding:7px 13px 12px;}
+  .note-cmd code{
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12.5px;
+    color:var(--text);
+  }
+  .note-cmd code::before{content:"$ ";color:var(--accent-hover);}
+
+  .note-body{display:none;padding:0 13px 13px;}
+  .note.open .note-body{display:block;animation:rise .18s ease both;}
+  .note-body pre{
+    margin:0;
+    padding:10px 12px;
+    border-radius:var(--radius);
+    background:var(--activity);
+    border:1px solid var(--border);
+    color:var(--muted);
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12px;
+    line-height:1.5;
+    white-space:pre-wrap;
+    overflow-x:auto;
+  }
+
+  /* ---------- подтверждение ---------- */
+
+  .confirm{
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+    padding:15px;
+    border:1px solid var(--accent);
+    border-radius:var(--radius-lg);
+    background:var(--surface);
+    animation:rise .24s ease both;
+  }
+
+  .confirm-head{display:flex;gap:10px;align-items:flex-start;}
+
+  .confirm-icon{
+    flex:0 0 26px;
+    height:26px;
+    display:grid;
+    place-items:center;
+    border-radius:9px;
+    font-size:13px;
+    font-weight:700;
+    color:var(--text);
+    background:var(--active-bg);
+    border:1px solid var(--accent);
+  }
+
+  .confirm-head h2{
+    margin:0;
+    font-size:13px;
+    font-weight:600;
+    letter-spacing:.2px;
+  }
+  .confirm-head p{
+    margin:3px 0 0;
+    font-size:12px;
+    color:var(--faint);
+  }
+
+  .label{
+    font-size:10.5px;
+    font-weight:600;
+    letter-spacing:.7px;
+    text-transform:uppercase;
+    color:var(--faint);
+  }
+
+  .row{display:flex;align-items:center;gap:9px;}
+  .stack{display:flex;flex-direction:column;gap:6px;}
+
+  .chip{
+    font-size:12px;
+    padding:3px 9px;
+    border-radius:999px;
+    background:var(--bg);
+    border:1px solid var(--border);
+  }
+
+  .intent{margin:0;font-size:13.5px;line-height:1.45;}
+
+  .code{
+    margin:0;
+    padding:10px 12px;
+    border-radius:var(--radius);
+    background:var(--activity);
+    border:1px solid var(--border);
+    color:var(--text);
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12.5px;
+    white-space:pre-wrap;
+    overflow-x:auto;
+  }
+  .code::before{content:"$ ";color:var(--accent-hover);}
+
+  .output{
+    width:100%;
+    min-height:104px;
+    max-height:240px;
+    resize:vertical;
+    padding:10px 12px;
+    border-radius:var(--radius);
+    background:var(--activity);
+    border:1px solid var(--border);
+    color:var(--muted);
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12px;
+    line-height:1.5;
+    white-space:pre;
+    overflow:auto;
+    transition:border-color .15s, box-shadow .15s, color .15s;
+  }
+  .output[readonly]{background:var(--activity);}
+  .output.editing{
+    color:var(--text);
+    border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--active-bg);
+  }
+
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;}
+
+  .reason{display:none;gap:8px;animation:rise .18s ease both;}
+  .reason.show{display:flex;}
+  .reason input{
+    flex:1;
+    padding:9px 12px;
+    border-radius:var(--radius);
+    background:var(--bg);
+    border:1px solid var(--border);
+    color:var(--text);
+    font-family:inherit;
+    font-size:13px;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .reason input:focus{
+    outline:none;
+    border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--active-bg);
+  }
+
+  /* ---------- подпись + ввод ---------- */
+
+  .foot{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    padding:0 4px;
+    font-size:11.5px;
+    color:var(--faint);
+  }
+  .model-name{
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:11.5px;
+    color:var(--muted);
+  }
+  .hint{opacity:.85;}
+
+  .composer{
+    display:flex;
+    gap:10px;
+    align-items:flex-end;
+    padding:10px 10px 10px 15px;
+    border:1px solid var(--border);
+    border-radius:var(--radius-lg);
+    background:var(--surface);
+    transition:border-color .15s, box-shadow .15s, background .15s;
+  }
+  .composer:focus-within{
+    border-color:var(--accent-hover);
+    background:var(--hover);
+    box-shadow:0 0 0 3px var(--active-bg);
+  }
+
+  .composer textarea{
+    flex:1;
+    min-height:44px;
+    max-height:168px;
+    padding:11px 0;
+    border:none;
+    background:transparent;
+    color:var(--text);
+    font-family:inherit;
+    font-size:14px;
+    line-height:1.4;
+    resize:none;
+    outline:none;
+  }
+  .composer textarea::placeholder{color:var(--faint);}
+
+  .send{
+    display:inline-flex;
+    align-items:center;
+    gap:7px;
+    padding:10px 15px;
+    border:none;
+    border-radius:10px;
+    background:var(--accent);
+    color:#fff;
+    font-family:inherit;
+    font-size:13px;
+    font-weight:600;
+    cursor:pointer;
+    transition:background .15s, transform .1s;
+  }
+  .send:hover{background:var(--accent-hover);}
+  .send:active{transform:translateY(1px);}
+
+  @media (max-width:560px){
+    .pane{padding:10px;gap:10px;}
+    .head{padding:8px 8px 8px 12px;}
+    .hint{display:none;}
+    .send span{display:none;}
+    .send{padding:11px 12px;}
+  }
+
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none !important;transition:none !important;}
+    .thread{scroll-behavior:auto;}
+  }
+</style>
+</head>
+<body>
+  <main class="pane">
+    <header class="head">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <h1>Чат</h1>
+      </div>
+      <span class="grow"></span>
+
+      <div class="select-wrap">
+        <select id="model" aria-label="Модель">
+          <option>claude-sonnet</option>
+          <option>gpt-4.1</option>
+        </select>
+        <svg class="chev" width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+          <path d="M2 4l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <label class="check"><input type="checkbox" checked> Авто</label>
+      <label class="check"><input type="checkbox" id="review" checked> Просмотр</label>
+
+      <button class="aux" id="clear" type="button">Очистить</button>
+      <button class="usage" id="usage" type="button" title="Изменить лимит">~1.2k / 8000</button>
+      <input class="limit" id="limit" type="number" value="8000" hidden>
+    </header>
+
+    <div class="thread" id="thread" role="log" aria-live="polite"></div>
+
+    <div class="foot">
+      <span class="model-name" id="model-name">claude-sonnet</span>
+      <span class="hint">Enter — отправить · Shift+Enter — новая строка</span>
+    </div>
+
+    <form class="composer" id="composer">
+      <textarea id="draft" rows="1" placeholder="Промпт…" enterkeyhint="send"></textarea>
+      <button class="send" type="submit">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M2 8l12-5-5 12-2-5-5-2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+        </svg>
+        <span>Отправить</span>
+      </button>
+    </form>
+  </main>
+
+<script>
+const history = [
+  { kind: "user", text: "сколько машина уже работает" },
+  { kind: "assistant", text: "Спрошу uptime на этом подключении." },
+  {
+    kind: "note",
+    status: "выполнено",
+    mcp: "ноутбук",
+    command: "uptime",
+    output: " 20:11:02 up 4 days, 3:12, 2 users, load average: 0.18, 0.22, 0.19"
+  },
+  { kind: "user", text: "а место на диске?" },
+  { kind: "assistant", text: "Команда уже выполнена. Вывод ждет отправки." }
+];
+
+const pending = {
+  mcp: "ноутбук",
+  intent: "Показать занятость корневого раздела",
+  command: "df -h /",
+  output: "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  460G  210G  227G  49% /"
+};
+
+const thread = document.getElementById("thread");
+const draftEl = document.getElementById("draft");
+
+function badgeClass(status) {
+  if (status === "отклонено") return "bad";
+  if (status === "ожидает") return "wait";
+  return "ok";
+}
+
+function note(item) {
+  const block = document.createElement("article");
+  block.className = "note";
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "note-head";
+  head.setAttribute("aria-expanded", "false");
+
+  const badge = document.createElement("span");
+  badge.className = "badge " + badgeClass(item.status);
+  badge.textContent = item.status;
+
+  const mcp = document.createElement("span");
+  mcp.className = "note-mcp";
+  mcp.textContent = item.mcp;
+
+  const chev = document.createElement("span");
+  chev.className = "chev";
+  chev.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">' +
+    '<path d="M4 2.5L8 6l-4 3.5" stroke="currentColor" stroke-width="1.5" ' +
+    'stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  head.append(badge, mcp, chev);
+
+  const cmd = document.createElement("div");
+  cmd.className = "note-cmd";
+  const code = document.createElement("code");
+  code.textContent = item.command;
+  cmd.append(code);
+
+  const body = document.createElement("div");
+  body.className = "note-body";
+  const pre = document.createElement("pre");
+  pre.textContent = item.output;
+  body.append(pre);
+
+  head.addEventListener("click", () => {
+    const open = block.classList.toggle("open");
+    head.setAttribute("aria-expanded", String(open));
+  });
+
+  block.append(head, cmd, body);
+  return block;
+}
+
+function confirmCard() {
+  const card = document.createElement("section");
+  card.className = "confirm";
+  card.innerHTML = `
+    <header class="confirm-head">
+      <span class="confirm-icon" aria-hidden="true">!</span>
+      <div>
+        <h2>Подтверждение отправки</h2>
+        <p>Проверьте данные перед отправкой в модель</p>
+      </div>
+    </header>
+    <div class="row">
+      <span class="label">MCP</span>
+      <span class="chip"></span>
+    </div>
+    <div class="stack">
+      <span class="label">Намерение</span>
+      <p class="intent"></p>
+    </div>
+    <div class="stack">
+      <span class="label">Команда</span>
+      <pre class="code"></pre>
+    </div>
+    <div class="stack">
+      <span class="label">Вывод</span>
+      <textarea class="output" readonly spellcheck="false"></textarea>
+    </div>
+    <div class="actions">
+      <button class="aux primary" type="button" data-act="send">Отправить</button>
+      <button class="aux" type="button" data-act="redact">Обезличить</button>
+      <button class="aux" type="button" data-act="reject">Отклонить по причине</button>
+    </div>
+    <form class="reason">
+      <input type="text" placeholder="Почему вывод не отправлять">
+      <button class="aux" type="submit">Отправить отказ</button>
+    </form>
+  `;
+
+  card.querySelector(".chip").textContent = pending.mcp;
+  card.querySelector(".intent").textContent = pending.intent;
+  card.querySelector(".code").textContent = pending.command;
+
+  const output = card.querySelector(".output");
+  output.value = pending.output;
+
+  const reason = card.querySelector(".reason");
+
+  card.querySelector('[data-act="redact"]').addEventListener("click", () => {
+    output.readOnly = false;
+    output.classList.add("editing");
+    output.focus();
+    output.setSelectionRange(output.value.length, output.value.length);
+  });
+
+  card.querySelector('[data-act="reject"]').addEventListener("click", () => {
+    reason.classList.add("show");
+    reason.querySelector("input").focus();
+  });
+
+  card.querySelector('[data-act="send"]').addEventListener("click", () => {
+    history.push({
+      kind: "note",
+      status: "выполнено",
+      mcp: pending.mcp,
+      command: pending.command,
+      output: output.value
+    });
+    history.push({ kind: "assistant", text: "Вывод принят. На корне занято около половины диска." });
+    card.remove();
+    render();
+  });
+
+  reason.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const why = reason.querySelector("input").value.trim() || "без пояснения";
+    history.push({
+      kind: "note",
+      status: "отклонено",
+      mcp: pending.mcp,
+      command: pending.command,
+      output: why
+    });
+    card.remove();
+    render();
+  });
+
+  return card;
+}
+
+function render() {
+  thread.innerHTML = "";
+
+  history.forEach((item) => {
+    if (item.kind === "note") {
+      thread.append(note(item));
+      return;
+    }
+    const node = document.createElement("div");
+    node.className = item.kind;
+    node.textContent = item.text;
+    thread.append(node);
+  });
+
+  const alreadyResolved = history.some(
+    (item) => item.kind === "note" && item.command === pending.command
+  );
+  if (!alreadyResolved) thread.append(confirmCard());
+
+  thread.scrollTop = thread.scrollHeight;
+}
+
+function autoGrow() {
+  draftEl.style.height = "auto";
+  draftEl.style.height = Math.min(draftEl.scrollHeight, 168) + "px";
+}
+
+draftEl.addEventListener("input", autoGrow);
+
+document.getElementById("composer").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = draftEl.value.trim();
+  if (!text) return;
+
+  history.push({ kind: "user", text });
+  history.push({
+    kind: "assistant",
+    text: "Записала. Если нужна команда, она появится запросом на подтверждение."
+  });
+
+  draftEl.value = "";
+  autoGrow();
+  render();
+});
+
+draftEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    document.getElementById("composer").requestSubmit();
+  }
+});
+
+document.getElementById("clear").addEventListener("click", () => {
+  history.length = 0;
+  render();
+});
+
+document.getElementById("usage").addEventListener("click", () => {
+  const field = document.getElementById("limit");
+  field.hidden = !field.hidden;
+  if (!field.hidden) field.focus();
+});
+
+document.getElementById("model").addEventListener("change", (event) => {
+  document.getElementById("model-name").textContent = event.target.value;
+});
+
+render();
+</script>
+</body>
+</html>

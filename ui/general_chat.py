@@ -208,17 +208,21 @@ class GeneralChatPage(QWidget):
     def _build_chat(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 8, 10, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self._tab_bar = QHBoxLayout()
-        self._tab_bar.setSpacing(6)
+        self._tab_bar.setContentsMargins(12, 0, 12, 0)
+        self._tab_bar.setSpacing(2)
         self._tab_host = QWidget()
+        self._tab_host.setObjectName("loungeTabBar")
         self._tab_host.setLayout(self._tab_bar)
         layout.addWidget(self._tab_host)
-        layout.addWidget(self._rule())
 
-        header = QHBoxLayout()
+        header_host = QWidget()
+        header_host.setObjectName("loungeHead")
+        header = QHBoxLayout(header_host)
+        header.setContentsMargins(18, 14, 18, 14)
         header.setSpacing(8)
         self._title = QLabel()
         self._title.setObjectName("loungeTitle")
@@ -236,6 +240,12 @@ class GeneralChatPage(QWidget):
         self._rename.setToolTip("Переименовать чат")
         self._rename.clicked.connect(self._begin_rename)
         header.addWidget(self._rename)
+        self._model_caption = QLabel("модель:")
+        self._model_caption.setObjectName("loungeModelCaption")
+        header.addWidget(self._model_caption)
+        self._model_label = QLabel()
+        self._model_label.setObjectName("loungeModel")
+        header.addWidget(self._model_label)
         header.addStretch(1)
         self._auto_run = QCheckBox("Авто")
         self._auto_run.setObjectName("autoRun")
@@ -244,16 +254,12 @@ class GeneralChatPage(QWidget):
             "выполнять автоматически при полном совпадении с паттернами"
         )
         header.addWidget(self._auto_run)
-        self._model_label = QLabel()
-        self._model_label.setObjectName("loungeModel")
-        header.addWidget(self._model_label)
         self._model_combo = QComboBox()
         self._model_combo.setObjectName("loungeModelCombo")
         self._model_combo.setMinimumWidth(180)
         self._model_combo.activated.connect(self._pick_model)
         header.addWidget(self._model_combo)
-        layout.addLayout(header)
-        layout.addWidget(self._rule())
+        layout.addWidget(header_host)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -261,8 +267,8 @@ class GeneralChatPage(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._transcript_host = QWidget()
         self._transcript = QVBoxLayout(self._transcript_host)
-        self._transcript.setContentsMargins(4, 4, 4, 4)
-        self._transcript.setSpacing(10)
+        self._transcript.setContentsMargins(24, 22, 24, 22)
+        self._transcript.setSpacing(14)
         self._transcript.addStretch(1)
         scroll.setWidget(self._transcript_host)
         scroll.viewport().installEventFilter(self)
@@ -290,7 +296,11 @@ class GeneralChatPage(QWidget):
         self._send.setMinimumWidth(120)
         self._send.clicked.connect(self._on_primary)
         row.addWidget(self._send, 0, Qt.AlignmentFlag.AlignBottom)
-        layout.addWidget(box)
+        composer_host = QWidget()
+        composer_layout = QVBoxLayout(composer_host)
+        composer_layout.setContentsMargins(16, 0, 16, 16)
+        composer_layout.addWidget(box)
+        layout.addWidget(composer_host)
         self._sync_composer()
         return page
 
@@ -384,10 +394,12 @@ class GeneralChatPage(QWidget):
         self._title.setVisible(not self._editing)
         self._title_edit.setVisible(self._editing)
         if tab.model_id:
+            self._model_caption.setVisible(True)
             self._model_label.setText(tab.model_label)
             self._model_label.setVisible(True)
             self._model_combo.setVisible(False)
         else:
+            self._model_caption.setVisible(False)
             self._model_label.setVisible(False)
             self._model_combo.setVisible(True)
             self._fill_model_combo()
@@ -580,6 +592,19 @@ class GeneralChatPage(QWidget):
             for _index, card in tab.cards
             if getattr(card, "record", "")
         ]
+        covered = {
+            key
+            for key in (
+                _call_command(text)
+                for text in saved
+            )
+            if key
+        }
+        for role, text in tab.messages:
+            if role == "command":
+                key = _call_command(text)
+                if key:
+                    covered.add(key)
 
         def already_shown(text: str) -> bool:
             if text not in saved:
@@ -592,6 +617,11 @@ class GeneralChatPage(QWidget):
             if role == "command" and already_shown(text):
                 place_cards(number)
                 continue
+            if role == "result":
+                key = _call_command(text)
+                if key and key in covered:
+                    place_cards(number)
+                    continue
             bubble = (
                 self._stored_command(text)
                 if role == "command"
@@ -685,7 +715,8 @@ class GeneralChatPage(QWidget):
                 str(data.get("command") or ""),
                 str(data.get("output") or ""),
                 str(data.get("mcp") or ""),
-            )
+            ),
+            variant="lounge",
         )
         if note is not None:
             note.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
@@ -694,7 +725,11 @@ class GeneralChatPage(QWidget):
 
     def _bubble(self, role: str, text: str) -> QWidget:
         if role == "result":
-            note = call_note(text)
+            note = call_note(text, variant="lounge")
+            if note is None:
+                legacy = _legacy_call(text)
+                if legacy:
+                    note = call_note(legacy, variant="lounge")
             if note is not None:
                 return note
             label = FittedText(text)
@@ -710,7 +745,7 @@ class GeneralChatPage(QWidget):
             margin=8,
             left_margin=14,
         )
-        label.setMaximumWidth(320 if role == "user" else 520)
+        label.setMaximumWidth(560 if role == "user" else 660)
         label.setMinimumWidth(48)
         # Подсказка ширины у текста нулевая, и растяжка забирала всю строку:
         # поле оставалось, а буквы не рисовались.
@@ -957,6 +992,47 @@ class GeneralChatPage(QWidget):
     def _style(self, widget: QWidget) -> None:
         widget.style().unpolish(widget)
         widget.style().polish(widget)
+
+
+def _call_command(payload: str) -> str:
+    """Команда из записи вызова, чтобы не рисовать её второй раз."""
+    text = payload.strip()
+    if not text:
+        return ""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        return " ".join(str(data.get("command") or "").split())
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lines and lines[-1].startswith("MCP:"):
+        lines = lines[:-1]
+    if not lines:
+        return ""
+    first = lines[0]
+    for prefix in ("выполнено:", "отклонено с комментарием", "отклонено"):
+        if first.startswith(prefix):
+            rest = first[len(prefix):].strip()
+            if rest:
+                return " ".join(rest.split())
+            if len(lines) > 1:
+                return " ".join(lines[1].split())
+            return ""
+    return ""
+
+
+def _legacy_call(payload: str) -> str:
+    """Старая строка «выполнено: … / MCP: …» в ту же карточку, что и новая запись."""
+    command = _call_command(payload)
+    if not command:
+        return ""
+    mcp = ""
+    for line in payload.splitlines():
+        if line.strip().startswith("MCP:"):
+            mcp = line.strip()[4:].strip()
+    status = "отклонено" if payload.strip().startswith("отклонено") else "выполнено"
+    return call_record(status, command, "", mcp)
 
 
 def _command_record(card: CommandCard) -> str:

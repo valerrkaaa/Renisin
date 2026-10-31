@@ -82,7 +82,7 @@ class _HopFields(QWidget):
         self.remove_button.setFixedWidth(34)
         self.remove_button.setAutoDefault(False)
         self.remove_button.setToolTip("Убрать этот узел из цепочки")
-        self.remove_button.setVisible(removable)
+        self.remove_button.setEnabled(removable)
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self))
         head.addWidget(self.remove_button)
         layout.addLayout(head)
@@ -119,6 +119,7 @@ class _HopFields(QWidget):
             "Если хост уже пускает ключом из настроек, пароль не нужен. "
             "Иначе ключ будет добавлен в authorized_keys."
         )
+        self._hop_index = 1
         layout.addWidget(self.install_key)
 
         self.host.textChanged.connect(lambda _text: self.changed.emit())
@@ -128,8 +129,21 @@ class _HopFields(QWidget):
         self._on_auth_changed()
 
     def set_index(self, index: int, removable: bool) -> None:
+        self._hop_index = index
         self.title.setText(f"Узел {index}")
-        self.remove_button.setVisible(removable)
+        # Первый узел цепочки убрать нельзя.
+        self.remove_button.setEnabled(index != 1 and removable)
+        self._sync_install_key()
+
+    def _sync_install_key(self) -> None:
+        """«Записать мой ключ» только у первого узла и только при входе паролем."""
+        allowed = (
+            getattr(self, "_hop_index", 1) == 1
+            and self.auth_method() == domain.SSHAuthMethod.PASSWORD
+        )
+        self.install_key.setVisible(allowed)
+        if not allowed:
+            self.install_key.setChecked(False)
 
     def endpoint(self) -> str:
         host = self.host.text().strip() or "…"
@@ -153,7 +167,8 @@ class _HopFields(QWidget):
 
     def wants_install(self) -> bool:
         return (
-            self.auth_method() == domain.SSHAuthMethod.PASSWORD
+            getattr(self, "_hop_index", 1) == 1
+            and self.auth_method() == domain.SSHAuthMethod.PASSWORD
             and self.install_key.isChecked()
         )
 
@@ -169,9 +184,7 @@ class _HopFields(QWidget):
         self._key_row.setVisible(is_key)
         self.passphrase.setVisible(is_key)
         self._secret_host.setVisible(is_password or is_key)
-        self.install_key.setVisible(is_password)
-        if not is_password:
-            self.install_key.setChecked(False)
+        self._sync_install_key()
         self.changed.emit()
 
     def _browse_key(self) -> None:
@@ -364,7 +377,39 @@ class _SessionCallDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._busy = False
+        self._packed = False
         self._call_done.connect(self._finish_call)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        QTimer.singleShot(0, self._shrink_to_content)
+
+    def _shrink_to_content(self) -> None:
+        """Высота окна равна форме, без пустой полосы вокруг подсказки."""
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        limit_w = 640
+        limit_h = 900
+        if screen is not None:
+            area = screen.availableGeometry()
+            limit_w = min(640, max(480, area.width() - 48))
+            limit_h = max(240, area.height() - 48)
+        self.setMaximumSize(limit_w, limit_h)
+        width = min(max(self.minimumWidth(), 520), limit_w)
+        host = getattr(self, "_form_host", None)
+        scroll = getattr(self, "_form_scroll", None)
+        layout = self.layout()
+        if host is not None and scroll is not None and layout is not None:
+            host.setMinimumWidth(max(0, width - 24))
+            host.updateGeometry()
+            content = max(host.sizeHint().height(), 1)
+            scroll.setMinimumHeight(min(content, max(80, limit_h - 80)))
+            scroll.setMaximumHeight(16777215)
+            layout.activate()
+            height = layout.sizeHint().height()
+            scroll.setMinimumHeight(0)
+        else:
+            height = self.sizeHint().height()
+        self.resize(width, min(max(height, 1), limit_h))
 
     def _finish_call(self, info: object, error: object) -> None:
         raise NotImplementedError
@@ -416,13 +461,15 @@ class CreateSessionDialog(_SessionCallDialog):
         self._created: Optional[domain.SessionInfo] = None
 
         self.setWindowTitle("Новая сессия")
-        self.setModal(True)
-        self._fit_to_screen(560, 680)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setMinimumWidth(520)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 10)
         root.setSpacing(10)
         form_host = QWidget()
+        self._form_host = form_host
         layout = QVBoxLayout(form_host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -433,6 +480,8 @@ class CreateSessionDialog(_SessionCallDialog):
             "он спрашивается один раз за запуск и остаётся только в памяти."
         )
         info.setWordWrap(True)
+        info.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        info.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         info.setStyleSheet("color:#8b8d97;")
         layout.addWidget(info)
 
@@ -559,8 +608,10 @@ class CreateSessionDialog(_SessionCallDialog):
         chain_layout.addWidget(self._add_hop, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self._chain_container)
         self._add_hop_row()
+        layout.addStretch(1)
 
         form_scroll = QScrollArea()
+        self._form_scroll = form_scroll
         form_scroll.setWidgetResizable(True)
         form_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         form_scroll.setWidget(form_host)
@@ -609,6 +660,8 @@ class CreateSessionDialog(_SessionCallDialog):
         self._ssh_container.setVisible(is_ssh)
         self._chain_container.setVisible(is_chain)
         self._shell_hint.setVisible(is_chain)
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
         self.name_edit.setPlaceholderText(
             "Например: prod-web" if is_ssh or is_chain else "Например: Рабочая CMD"
         )
@@ -650,16 +703,22 @@ class CreateSessionDialog(_SessionCallDialog):
     def _set_error(self, message: str) -> None:
         self._error_label.setText(message)
         self._error_label.setVisible(bool(message))
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
 
     def _clear_error(self) -> None:
         self._error_label.clear()
         self._error_label.setVisible(False)
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
 
     def _set_busy(self, busy: bool, status: str = "") -> None:
         self._busy = busy
         self._status_label.setText(status)
         self._status_label.setVisible(busy and bool(status))
         self._add_hop.setEnabled(not busy)
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
         if self._ok_button is not None:
             self._ok_button.setText("Подключение…" if busy else self._ok_text)
         if self._cancel_button is not None:
@@ -814,15 +873,23 @@ class CreateSessionDialog(_SessionCallDialog):
         self._hop_rows.append(row)
         self._renumber_hops()
         self._refresh_chain_route()
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
 
     def _remove_hop_row(self, row: object) -> None:
-        if not isinstance(row, _HopFields) or len(self._hop_rows) <= 1:
+        if (
+            not isinstance(row, _HopFields)
+            or len(self._hop_rows) <= 1
+            or self._hop_rows[0] is row
+        ):
             return
         self._hop_rows.remove(row)
         self._hop_layout.removeWidget(row)
         row.deleteLater()
         self._renumber_hops()
         self._refresh_chain_route()
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
 
     def _refresh_chain_route(self) -> None:
         parts = [row.endpoint() for row in self._hop_rows]
@@ -930,17 +997,13 @@ class UnlockSessionDialog(_SessionCallDialog):
             "Восстановление соединения" if reconnect else "Открытие сессии"
         )
         self.setModal(True)
-        if session_info.provider == domain.ProviderType.SSH_OVER_SSH:
-            self._fit_to_screen(520, 360 if reconnect else 440)
-        elif session_info.provider == domain.ProviderType.SSH:
-            self._fit_to_screen(520, 460)
-        else:
-            self._fit_to_screen(480, 280)
+        self.setMinimumWidth(480)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 10)
         root.setSpacing(10)
         form_host = QWidget()
+        self._form_host = form_host
         layout = QVBoxLayout(form_host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -1066,6 +1129,7 @@ class UnlockSessionDialog(_SessionCallDialog):
             self._on_auth_changed()
 
         form_scroll = QScrollArea()
+        self._form_scroll = form_scroll
         form_scroll.setWidgetResizable(True)
         form_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         form_scroll.setWidget(form_host)
@@ -1130,15 +1194,21 @@ class UnlockSessionDialog(_SessionCallDialog):
     def _set_error(self, message: str) -> None:
         self._error_label.setText(message)
         self._error_label.setVisible(bool(message))
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
 
     def _clear_error(self) -> None:
         self._error_label.clear()
         self._error_label.setVisible(False)
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
 
     def _set_busy(self, busy: bool, status: str = "") -> None:
         self._busy = busy
         self._status_label.setText(status)
         self._status_label.setVisible(busy and bool(status))
+        if self.isVisible():
+            QTimer.singleShot(0, self._shrink_to_content)
         if getattr(self, "_add_chain_hop", None) is not None:
             self._add_chain_hop.setEnabled(not busy)
         if self._ok_button is not None:

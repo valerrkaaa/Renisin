@@ -139,10 +139,17 @@ class _SelectableText(QTextEdit):
             # size() учитывает перенос строк и поля документа.
             # Высота по последнему блоку обрезала перенесённую строку,
             # и она рисовалась поверх кнопок под блоком.
-            height = max(1, math.ceil(document.size().height()) + chrome + 8)
+            content = math.ceil(document.size().height())
+            height = max(1, content + chrome + 8)
             if self.height() != height:
                 self.setFixedHeight(height)
-            self.verticalScrollBar().setValue(0)
+            # setFixedHeight не обновляет диапазон, если ширина текста не
+            # изменилась: полоса остаётся от прежней высоты в одну строку.
+            visible = max(1, self.viewport().height())
+            bar = self.verticalScrollBar()
+            bar.setPageStep(visible)
+            bar.setRange(0, max(0, content - visible))
+            bar.setValue(0)
         finally:
             self._fitting = False
 
@@ -186,56 +193,76 @@ def split_shell_blocks(text: str) -> List[Tuple[str, str]]:
 
 
 class _CallNote(QWidget):
-    """Свёрнутая строка вызова. По нажатию показывает команду и ответ."""
+    """Карточка вызова. По нажатию показывает вывод команды."""
 
-    def __init__(self, status: str, command: str, output: str, mcp: str = "") -> None:
+    def __init__(
+        self,
+        status: str,
+        command: str,
+        output: str,
+        mcp: str = "",
+        variant: str = "session",
+    ) -> None:
         super().__init__()
+        self._summary = None
         self._status = status.strip() or "выполнено"
         self._command = command
         self._open = False
+        self._variant = variant
+        self.setObjectName("callNote")
+        self.setProperty("variant", variant)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(6)
-        self._summary = QLabel()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        head = QHBoxLayout()
+        head.setContentsMargins(12, 8, 12, 8)
+        head.setSpacing(8)
+        self._chevron = QLabel("> ")
+        self._chevron.setObjectName("noteChevron")
+        self._mcp = " ".join(mcp.split())
+        self._mcp_label = QLabel(self._mcp)
+        self._mcp_label.setObjectName("noteMcp")
+        self._mcp_label.setWordWrap(True)
+        self._mcp_label.hide()
+        collapsed = " ".join(command.split()) or self._status
+        if variant == "lounge" and self._mcp:
+            collapsed = f"{self._mcp}: {collapsed}" if collapsed else self._mcp
+        self._summary = QLabel(collapsed)
         self._summary.setObjectName("toolCall")
         self._summary.setWordWrap(True)
-        self._summary.setCursor(Qt.CursorShape.PointingHandCursor)
+        head.addWidget(self._chevron, 0, Qt.AlignmentFlag.AlignTop)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        column.addWidget(self._mcp_label)
+        column.addWidget(self._summary)
+        head.addLayout(column, 1)
+        layout.addLayout(head)
         self._summary.installEventFilter(self)
-        layout.addWidget(self._summary)
+        self._chevron.installEventFilter(self)
         self._body = QWidget()
         self._body.setObjectName("toolCallBody")
         body = QVBoxLayout(self._body)
-        body.setContentsMargins(12, 0, 0, 0)
+        body.setContentsMargins(28, 0, 12, 12)
         body.setSpacing(4)
         self._command_view = _SelectableText(command, "commandText", margin=0)
         body.addWidget(self._command_view)
         self._answer_view = _SelectableText(output, "commandOutput", margin=0)
         body.addWidget(self._answer_view)
-        self._mcp = " ".join(mcp.split())
         self._body.hide()
         layout.addWidget(self._body)
         self._show_summary()
 
     def _show_summary(self) -> None:
-        text = self._line()
-        self._summary.setText(text)
-        lines = text.count("\n") + 1
-        self._summary.setMinimumHeight(self._summary.fontMetrics().lineSpacing() * lines + 4)
-
-    def _line(self) -> str:
-        """Имя MCP на первой строке, стрелка и команда — на следующей."""
-        mark = "v" if self._open else ">"
-        head = f"{self._status}:"
-        if self._mcp:
-            head = f"{head} {self._mcp}"
-        command = " ".join(self._command.split())
-        if command:
-            return f"{head}\n{mark} {command}"
-        return f"{mark} {head}"
+        self._chevron.setText("v " if self._open else "> ")
+        self._summary.setVisible(not self._open)
+        self._mcp_label.setVisible(self._open and bool(self._mcp))
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if (
-            obj is self._summary
+            obj in (self._summary, self._chevron)
+            and self._summary is not None
             and event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
         ):
@@ -257,7 +284,7 @@ class _CallNote(QWidget):
             return
 
 
-def call_note(text: str) -> Optional[QWidget]:
+def call_note(text: str, variant: str = "session") -> Optional[QWidget]:
     data = parse_call(text)
     if data is None:
         return None
@@ -266,6 +293,7 @@ def call_note(text: str) -> Optional[QWidget]:
         str(data.get("command") or ""),
         str(data.get("output") or ""),
         str(data.get("mcp") or ""),
+        variant=variant,
     )
 
 
@@ -457,6 +485,7 @@ class _CommandRequest(QFrame):
         layout.setSpacing(8)
         title = QLabel("Запрос на выполнение команды")
         title.setObjectName("requestTitle")
+        self._title = title
         layout.addWidget(title)
         if target:
             where = QLabel(f"MCP: {target}")
@@ -636,6 +665,10 @@ class _CommandRequest(QFrame):
         if not self._editable:
             self._output.setPlainText(shown)
         self._output.setVisible(True)
+        self._title.setText("Подтверждение отправки")
+        self.setProperty("review", "true")
+        self.style().unpolish(self)
+        self.style().polish(self)
         if not self._editable:
             self._output.setReadOnly(True)
         self._review_row.setVisible(True)
@@ -684,56 +717,67 @@ class ChatPane(QWidget):
 
     def __init__(self, mono: QFont, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._width_floor = 0
         self.setObjectName("chatPane")
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(12)
 
-        head = QHBoxLayout()
+        head_frame = QFrame()
+        head_frame.setObjectName("chatHead")
+        head = QVBoxLayout(head_frame)
+        head.setContentsMargins(14, 10, 12, 10)
         head.setSpacing(8)
         title = QLabel("Чат")
         title.setObjectName("chatTitle")
-        head.addWidget(title)
-        head.addStretch(1)
         self._model_combo = QComboBox()
         self._model_combo.setObjectName("chatModelCombo")
-        self._model_combo.setMinimumWidth(180)
+        self._model_combo.setMinimumWidth(0)
+        self._model_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._model_combo.setMinimumContentsLength(8)
         self._model_combo.activated.connect(self._on_header_model)
-        head.addWidget(self._model_combo)
-        self._auto_run = QCheckBox("Авто")
+        self._usage_tokens = 0
+        self._usage_messages = 0
+        self._usage = QPushButton("лимит")
+        self._usage.setObjectName("usageButton")
+        self._usage.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._usage.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
+        self._usage.setMinimumHeight(self._usage.fontMetrics().height() + 12)
+        self._usage.setToolTip(
+            "Сколько токенов из лимита уйдёт в модель.\n"
+            "Нажмите, чтобы задать лимит или сбросить контекст."
+        )
+        self._usage.clicked.connect(self._open_limit)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        top.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addStretch(1)
+        top.addWidget(self._model_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self._usage, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addLayout(top)
+        self._auto_run = QCheckBox("Автовыполнение")
         self._auto_run.setObjectName("autoRun")
         self._auto_run.setChecked(True)
         self._auto_run.setToolTip(
             "выполнять автоматически при полном совпадении с паттернами"
         )
-        head.addWidget(self._auto_run)
-        self._review_output = QCheckBox("Просмотр")
+        self._review_output = QCheckBox("Предпросмотр вывода")
         self._review_output.setObjectName("reviewOutput")
         self._review_output.setChecked(True)
         self._review_output.setToolTip(
             "Показывать вывод команды перед отправкой модели.\n"
             "Если выключено, ответ уходит сразу."
         )
-        head.addWidget(self._review_output)
-        self._clear = QPushButton("Очистить")
-        self._clear.setObjectName("auxButton")
-        self._clear.setToolTip(
-            "Остановить ответ, сбросить контекст модели\n"
-            "и убрать сообщения из этого чата."
-        )
-        self._clear.clicked.connect(self.clear_requested.emit)
-        head.addWidget(self._clear)
-        self._usage_tokens = 0
-        self._usage_messages = 0
-        self._usage = QPushButton("лимит")
-        self._usage.setObjectName("usageButton")
-        self._usage.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._usage.setToolTip(
-            "Сколько токенов из лимита уйдёт в модель.\n"
-            "Нажмите, чтобы задать лимит или сбросить контекст."
-        )
-        self._usage.clicked.connect(self._open_limit)
-        head.addWidget(self._usage)
+        switches = QHBoxLayout()
+        switches.setSpacing(8)
+        switches.addStretch(1)
+        switches.addWidget(self._auto_run, 0, Qt.AlignmentFlag.AlignVCenter)
+        switches.addWidget(self._review_output, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addLayout(switches)
         self._limit = QSpinBox()
         self._limit.setObjectName("chatLimit")
         self._limit.setRange(256, 1_000_000)
@@ -759,7 +803,7 @@ class ChatPane(QWidget):
         popup_layout.addWidget(caption)
         popup_layout.addWidget(self._limit)
         popup_layout.addWidget(self._reset)
-        root.addLayout(head)
+        root.addWidget(head_frame)
 
         self._banner = QFrame()
         self._banner.setObjectName("offlineBanner")
@@ -809,19 +853,32 @@ class ChatPane(QWidget):
         self._fitting = False
         self._fit_again = False
 
+        foot = QHBoxLayout()
+        foot.setContentsMargins(4, 0, 4, 0)
+        self._model_name = QLabel("")
+        self._model_name.setObjectName("chatModelName")
+        self._model_name.setMinimumWidth(0)
+        self._model_name.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        foot.addWidget(self._model_name, 1)
+        hint = QLabel("Shift+Enter — новая строка")
+        hint.setObjectName("chatHint")
+        hint.setMinimumWidth(0)
+        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        foot.addWidget(hint, 1)
+        root.addLayout(foot)
+
         box = QFrame()
         box.setObjectName("inputPanel")
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(10, 6, 8, 6)
+        box_layout.setContentsMargins(12, 8, 10, 8)
         box_layout.setSpacing(8)
-        self._model_name = QLabel("")
-        self._model_name.setObjectName("chatModelName")
-        box_layout.addWidget(self._model_name)
         self._input = QTextEdit()
         self._input.setObjectName("chatInput")
         self._input.setFont(mono)
         self._mono = mono
-        self._input.setPlaceholderText("Промпт... Enter - отправить, Ctrl+Enter или Shift+Enter- новая строка")
+        self._input.setPlaceholderText("Промпт…")
         self._input.document().setDocumentMargin(2)
         self._input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -847,6 +904,18 @@ class ChatPane(QWidget):
         self._thinking_timer.setInterval(420)
         self._thinking_timer.timeout.connect(self._advance_thinking)
         self._request_card: QWidget | None = None
+
+    def set_width_floor(self, width: int) -> None:
+        """Ниже этой ширины колонку чата не сжать."""
+        self._width_floor = max(0, int(width))
+        self.setMinimumWidth(self._width_floor)
+        self.updateGeometry()
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        hint = super().minimumSizeHint()
+        if self._width_floor:
+            return QSize(self._width_floor, hint.height())
+        return hint
 
     def _build_picker(self) -> QWidget:
         host = QWidget()
@@ -893,7 +962,6 @@ class ChatPane(QWidget):
             self._model_combo,
             self._auto_run,
             self._review_output,
-            self._clear,
             self._usage,
         ):
             widget.setVisible(bound)
@@ -1239,7 +1307,13 @@ class ChatPane(QWidget):
             if widget is None:
                 widget = FittedText(shown)
                 widget.setObjectName("toolOutcome")
-            widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+                widget.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+                )
+            else:
+                widget.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+                )
             self._insert_message(widget)
             return widget
         if role == "os":
@@ -1275,7 +1349,7 @@ class ChatPane(QWidget):
     def _assistant_message(self, text: str) -> QWidget:
         parts = split_shell_blocks(text)
         if len(parts) == 1 and parts[0][0] == "text":
-            return self._bubble(parts[0][1], "chatAssistant")
+            return self._assistant_row(parts[0][1])
         box = QWidget()
         box.setObjectName("chatAssistant")
         layout = QVBoxLayout(box)
@@ -1352,6 +1426,19 @@ class ChatPane(QWidget):
         layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
         return frame
 
+    def _assistant_row(self, text: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(10)
+        mark = QLabel("✦")
+        mark.setObjectName("assistantMark")
+        mark.setFixedSize(26, 26)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(mark, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._bubble(text, "chatAssistant"), 1)
+        return row
+
     def _user_row(self, text: str) -> QWidget:
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -1363,7 +1450,7 @@ class ChatPane(QWidget):
     def _bubble(self, text: str, name: str) -> _SelectableText:
         if name == "chatUser":
             bubble = _SelectableText(text, name, margin=8, left_margin=14)
-            bubble.setMaximumWidth(320)
+            bubble.setMaximumWidth(440)
             bubble.setMinimumWidth(48)
             bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             return bubble

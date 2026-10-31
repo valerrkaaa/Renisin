@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import Callable, List, Optional
@@ -14,6 +14,7 @@ from uuid import uuid4
 
 
 SessionId = str
+ConnectionId = str
 CommandId = str
 EventId = str
 CredentialRef = str
@@ -37,6 +38,18 @@ def normalize_shell_family(value: str) -> str:
 
 def new_session_id() -> SessionId:
     return f"s-{uuid4().hex}"
+
+
+def new_connection_id() -> ConnectionId:
+    return f"k-{uuid4().hex}"
+
+
+def connection_id_for_session(session_id: str) -> ConnectionId:
+    """Стабильный id подключения при миграции старой сессии."""
+    text = str(session_id or "").strip()
+    if text.startswith("s-"):
+        return "k-" + text[2:]
+    return "k-" + text
 
 
 def new_command_id() -> CommandId:
@@ -321,6 +334,43 @@ class SessionInfo:
     username: str = ""
     # ОС, выбранная при создании: от неё зависят разделители команд в запросе.
     shell_family: str = SHELL_UNIX
+    # Пустой — запись ещё не привязана к подключению.
+    connection_id: str = ""
+
+
+@dataclass(frozen=True)
+class ConnectionInfo:
+    """Сохранённый способ войти на машину. Сам терминал не открывает."""
+
+    connection_id: str
+    name: str
+    provider: ProviderType
+    identity: ExecutionIdentityType = ExecutionIdentityType.CURRENT_USER
+    ssh: Optional[SSHConfig] = None
+    mcp_alias: str = ""
+    mcp_description: str = ""
+    os_name: str = ""
+    ip_addresses: str = ""
+    username: str = ""
+    shell_family: str = SHELL_UNIX
+    expanded: bool = False
+
+
+def project_session(info: SessionInfo, connection: ConnectionInfo) -> SessionInfo:
+    """Сессия для экрана и драйвера: машина берётся у подключения."""
+    return replace(
+        info,
+        provider=connection.provider,
+        identity=connection.identity,
+        ssh=connection.ssh,
+        mcp_alias=connection.mcp_alias,
+        mcp_description=connection.mcp_description,
+        os_name=connection.os_name,
+        ip_addresses=connection.ip_addresses,
+        username=connection.username,
+        shell_family=connection.shell_family,
+        connection_id=connection.connection_id,
+    )
 
 
 @dataclass(frozen=True)

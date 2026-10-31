@@ -140,6 +140,7 @@ QWidget#workArea, QWidget#chatPane {{
 QWidget#sideBar {{
     background: {SIDEBAR};
     color: {TEXT};
+    border-right: 1px solid {BORDER};
 }}
 QWidget#generalChat {{
     background: {CANVAS};
@@ -176,9 +177,20 @@ QLabel#toolOutcome, QTextEdit#toolOutcome {{
     selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
-QLabel#loungeModel, QLabel#mcpRailTitle {{
-    color: {TEXT};
+QLabel#loungeTitle {{
+    font-size: 16px;
     font-weight: 600;
+}}
+QLabel#loungeModelCaption {{
+    color: {MUTED};
+}}
+QLabel#loungeModel {{
+    color: {TEXT};
+}}
+QLabel#mcpRailTitle {{
+    color: {FAINT};
+    font-size: 11px;
+    font-weight: 700;
 }}
 QLabel#mcpRailHint {{
     color: {MUTED};
@@ -207,24 +219,42 @@ QPlainTextEdit#loungeDraft {{
     border-radius: 0;
     padding: 2px 2px;
 }}
+QWidget#loungeTabBar {{
+    border-bottom: 1px solid {BORDER};
+    min-height: 46px;
+}}
+QWidget#loungeHead {{
+    border-bottom: 1px solid {BORDER};
+}}
 QPushButton#chatTab, QPushButton#chatTabAdd {{
-    background: {SURFACE};
+    background: transparent;
     color: {MUTED};
-    border: 1px solid {BORDER};
-    border-bottom: none;
-    border-top-left-radius: {RADIUS}px;
-    border-top-right-radius: {RADIUS}px;
-    padding: 4px 10px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 12px 8px;
+    font-size: 13px;
 }}
 QPushButton#chatTab[active="true"] {{
-    background: {SELECTION};
+    background: transparent;
     color: {TEXT};
+    font-weight: 600;
+    border-bottom: 2px solid {ACCENT_HOVER};
 }}
 QPushButton#chatTabAdd {{
-    border-bottom: 1px solid {BORDER};
+    border-bottom: none;
     border-radius: {RADIUS}px;
     padding: 0;
-    font-size: 14px;
+    color: {FAINT};
+    font-size: 18px;
+    min-width: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    max-height: 28px;
+}}
+QPushButton#chatTabAdd:hover {{
+    background: #222328;
+    color: {TEXT};
 }}
 QPushButton#chatTabClose {{
     background: transparent;
@@ -262,8 +292,12 @@ QListWidget#mcpList {{
 }}
 QListWidget#mcpList::item {{
     color: {TEXT};
-    padding: 4px 2px;
-    border-bottom: 1px solid {BORDER};
+    padding: 8px 10px;
+    border-bottom: none;
+    border-radius: {RADIUS}px;
+}}
+QListWidget#mcpList::item:hover {{
+    background: #222328;
 }}
 QLabel {{
     background: transparent;
@@ -303,10 +337,19 @@ QLabel#statusBadge[error="true"] {{
     color: {DANGER};
 }}
 QLabel#sidebarTitle {{
-    color: {MUTED};
-    font-size: 11px;
+    color: {FAINT};
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
+}}
+QPushButton#headerAction {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0;
+}}
+QPushButton#headerAction:hover {{
+    background: #222328;
 }}
 QListWidget#sessionList, QTreeWidget#sessionList {{
     background: transparent;
@@ -335,14 +378,30 @@ QTreeWidget#sessionList::branch {{
     width: 0px;
 }}
 QWidget#sessionRow {{
-    background: {SIDEBAR};
-    border-radius: {RADIUS}px;
+    background: transparent;
+    border: none;
 }}
-QWidget#sessionRow[hover="true"] {{
-    background: #222328;
+QWidget#sessionRow QLabel {{
+    font-size: 14px;
+    background: transparent;
 }}
-QWidget#sessionRow[active="true"] {{
-    background: {SELECTION};
+QLabel#pinnedLabel {{
+    color: {TEXT};
+    font-size: 14px;
+    font-weight: 600;
+}}
+QFrame#treeDivider {{
+    background: {BORDER};
+    border: none;
+    max-height: 1px;
+}}
+QLabel#folderTitle {{
+    color: {MUTED};
+    font-weight: 600;
+}}
+QLabel#connectionTitle {{
+    color: {TEXT};
+    font-weight: 600;
 }}
 QLabel#sessionName, QLabel#sessionMuted {{
     background: transparent;
@@ -378,6 +437,19 @@ QPushButton#sessionFold {{
     padding: 0;
 }}
 QPushButton#sessionFold:hover {{
+    background: {SURFACE};
+    color: {TEXT};
+}}
+QPushButton#sessionAdd {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    border-radius: {RADIUS}px;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 0;
+}}
+QPushButton#sessionAdd:hover {{
     background: {SURFACE};
     color: {TEXT};
 }}
@@ -455,9 +527,14 @@ QTextEdit#commandOutput {{
     selection-color: #ffffff;
 }}
 QFrame#inputPanel {{
-    background: {INPUT};
+    background: {SURFACE};
     border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
+    border-radius: 12px;
+}}
+QWidget#generalChat QFrame#inputPanel QPlainTextEdit,
+QWidget#chatPane QFrame#inputPanel QTextEdit {{
+    background: transparent;
+    border: none;
 }}
 QLineEdit#commandInput, QPlainTextEdit#commandInput {{
     background: transparent;
@@ -684,20 +761,32 @@ QListWidget#completionList::item:selected {{
 QLabel#chatUser, QTextEdit#chatUser {{
     background: {SELECTION};
     color: {TEXT};
-    border: none;
-    border-radius: {RADIUS}px;
+    border: 1px solid {ACCENT};
+    border-radius: 14px;
     padding: 0;
     selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
+QWidget#generalChat QLabel#chatUser, QWidget#generalChat QTextEdit#chatUser {{
+    background: {ACCENT};
+    color: #ffffff;
+    border: none;
+    border-radius: 14px;
+}}
 QLabel#chatAssistant, QTextEdit#chatAssistant, QWidget#chatAssistant {{
-    background: {SURFACE};
+    background: transparent;
     color: {TEXT};
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
+    border: none;
+    border-radius: 0;
     padding: 0;
     selection-background-color: {ACCENT};
     selection-color: #ffffff;
+}}
+QWidget#generalChat QLabel#chatAssistant, QWidget#generalChat QTextEdit#chatAssistant {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
 }}
 QLabel#chatPlain, QTextEdit#chatPlain {{
     color: {TEXT};
@@ -740,7 +829,112 @@ QLabel#shellCode, QTextEdit#shellCode {{
 QFrame#commandRequest {{
     background: {SURFACE};
     border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
+    border-radius: 10px;
+}}
+QFrame#commandRequest[review="true"] {{
+    border: 1px solid {ACCENT};
+}}
+QFrame#chatHead {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+QLabel#chatTitle {{
+    color: {TEXT};
+    background: transparent;
+    font-size: 14px;
+    font-weight: 600;
+}}
+QLabel#assistantMark {{
+    background: {ACCENT};
+    color: #ffffff;
+    border-radius: 9px;
+    font-size: 12px;
+}}
+QLabel#chatHint, QLabel#chatModelName {{
+    color: {MUTED};
+    font-size: 12px;
+    background: transparent;
+}}
+QFrame#chatHead QComboBox#chatModelCombo,
+QFrame#chatHead QPushButton#auxButton,
+QFrame#chatHead QPushButton#usageButton {{
+    background: {INPUT};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 11px;
+    padding: 2px 12px;
+    min-height: 26px;
+}}
+QFrame#chatHead QPushButton#usageButton {{
+    color: {MUTED};
+    font-size: 12px;
+}}
+QFrame#chatHead QPushButton#auxButton:hover,
+QFrame#chatHead QPushButton#usageButton:hover {{
+    background: #222328;
+    border-color: {ACCENT_HOVER};
+}}
+QCheckBox#autoRun::indicator, QCheckBox#reviewOutput::indicator {{
+    width: 30px;
+    height: 17px;
+    border-radius: 8px;
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+}}
+QCheckBox#autoRun::indicator:checked, QCheckBox#reviewOutput::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+}}
+QFrame#chatHead QCheckBox#autoRun, QFrame#chatHead QCheckBox#reviewOutput {{
+    color: {MUTED};
+    background: {INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 11px;
+    padding: 2px 10px 2px 8px;
+    min-height: 26px;
+}}
+QFrame#chatHead QCheckBox#autoRun:checked, QFrame#chatHead QCheckBox#reviewOutput:checked {{
+    color: {TEXT};
+    background: {SELECTION};
+    border-color: {ACCENT};
+}}
+QWidget#callNote {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+QWidget#callNote[variant="lounge"] {{
+    background: {SIDEBAR};
+}}
+QLabel#noteMcp, QLabel#noteChevron {{
+    color: {FAINT};
+    background: transparent;
+}}
+QLabel#notePrompt {{
+    color: {ACCENT_HOVER};
+    background: transparent;
+}}
+QWidget#callNote QLabel#toolCall {{
+    color: {TEXT};
+    background: transparent;
+}}
+QLabel#noteBadge {{
+    background: {SELECTION};
+    color: {TEXT};
+    border: 1px solid {ACCENT};
+    border-radius: 9px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QLabel#noteBadge[kind="bad"] {{
+    background: {CANVAS};
+    color: {MUTED};
+    border: 1px solid {BORDER};
+}}
+QWidget#toolCallBody {{
+    background: transparent;
 }}
 QLabel#commandIntent {{
     color: {TEXT};

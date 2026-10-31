@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Иерархия сессий</title>
+  <style>
+    :root {
+      --canvas: #1f1f1f;
+      --sidebar: #181818;
+      --surface: #262626;
+      --border: #2e2f36;
+      --text: #e4e4e7;
+      --muted: #8b8d97;
+      --faint: #6b6d78;
+      --selection: #1f2440;
+      --danger: #fb7185;
+      --ok: #86efac;
+      --running: #fcd34d;
+      --radius: 5px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--canvas);
+      color: var(--text);
+      font: 12px/1.3 "Segoe UI", sans-serif;
+    }
+
+    .sidebar {
+      width: 200px;
+      height: 100%;
+      background: var(--sidebar);
+      padding: 8px 6px 8px 8px;
+      overflow: auto;
+    }
+
+    .title {
+      margin: 0 0 2px;
+      padding: 2px 8px 6px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 34px;
+      margin: 1px 0;
+      padding: 6px 8px;
+      border-radius: var(--radius);
+      background: var(--sidebar);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .row:hover { background: #222328; }
+    .row.active { background: var(--selection); }
+
+    .name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .row.group .name {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .row.connection .name {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .row.session .name { color: var(--text); }
+    .row.session.closed .name { color: var(--faint); }
+    .row.session.offline .name { color: var(--danger); }
+    .row.session.running .name { color: var(--ok); }
+
+    .mark {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 16px;
+    }
+
+    .fold, .add {
+      width: 22px;
+      height: 22px;
+      flex: 0 0 22px;
+      margin: 0;
+      padding: 0;
+      border: none;
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--muted);
+      font: 600 14px/22px "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+
+    .fold { font-size: 12px; font-weight: 400; }
+
+    .fold:hover, .add:hover {
+      background: var(--surface);
+      color: var(--text);
+    }
+
+    .menu {
+      position: fixed;
+      z-index: 5;
+      min-width: 168px;
+      padding: 4px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+
+    .menu button {
+      display: block;
+      width: 100%;
+      margin: 0;
+      padding: 6px 10px;
+      border: none;
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .menu button:hover { background: #222328; }
+  </style>
+</head>
+<body>
+  <aside class="sidebar">
+    <h1 class="title">СЕССИИ</h1>
+    <div id="tree"></div>
+  </aside>
+  <script>
+    const folderIcon = '<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M7 14h6l2-3h9v13H7z" fill="none" stroke="#e4e4e7" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+    const terminalIcon = '<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="7" y="8" width="18" height="16" rx="2" fill="none" stroke="#e4e4e7" stroke-width="1.8"/><path d="M11 14l3 3-3 3M16 20h5" fill="none" stroke="#e4e4e7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+    const tree = [
+      { id: "lounge", kind: "lounge", name: "общий чат для ИИ" },
+      {
+        id: "g-servers",
+        kind: "group",
+        name: "серверы",
+        expanded: true,
+        children: [
+          {
+            id: "k-edge",
+            kind: "connection",
+            name: "k8s-edge",
+            expanded: false,
+            children: [
+              { id: "s-work", kind: "session", name: "работа", tone: "ready" },
+              { id: "s-logs", kind: "session", name: "логи", tone: "closed" },
+            ],
+          },
+          {
+            id: "k-db",
+            kind: "connection",
+            name: "db",
+            expanded: false,
+            children: [
+              { id: "s-psql", kind: "session", name: "psql", tone: "offline" },
+            ],
+          },
+        ],
+      },
+      {
+        id: "g-home",
+        kind: "group",
+        name: "дом",
+        expanded: false,
+        children: [
+          {
+            id: "k-laptop",
+            kind: "connection",
+            name: "ноутбук",
+            expanded: false,
+            children: [
+              { id: "s-cmd", kind: "session", name: "cmd", tone: "running" },
+            ],
+          },
+        ],
+      },
+      {
+        id: "k-local",
+        kind: "connection",
+        name: "локальная консоль",
+        expanded: false,
+        children: [
+          { id: "s-local", kind: "session", name: "сессия 1", tone: "ready" },
+        ],
+      },
+    ];
+
+    let activeId = "lounge";
+    let seq = 1;
+    const host = document.getElementById("tree");
+
+    function find(id, nodes = tree, parent = null) {
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index];
+        if (node.id === id) return { node, nodes, index, parent };
+        if (node.children) {
+          const hit = find(id, node.children, node);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    }
+
+    function depthOf(id) {
+      let depth = 0;
+      let current = find(id);
+      while (current && current.parent) {
+        depth += 1;
+        current = find(current.parent.id);
+      }
+      return depth;
+    }
+
+    function rowPad(node) {
+      const depth = depthOf(node.id);
+      const extra = node.kind === "session" ? 50 : 0;
+      return 8 + depth * 16 + extra;
+    }
+
+    function render() {
+      host.replaceChildren();
+      draw(tree);
+    }
+
+    function draw(nodes) {
+      nodes.forEach((node) => {
+        host.append(row(node));
+        if (node.children && node.expanded) draw(node.children);
+      });
+    }
+
+    function row(node) {
+      const element = document.createElement("div");
+      element.className = "row " + node.kind + (node.tone ? " " + node.tone : "");
+      if (node.id === activeId) element.classList.add("active");
+      element.style.paddingLeft = rowPad(node) + "px";
+
+      if (node.kind === "group" || node.kind === "connection") {
+        const fold = document.createElement("button");
+        fold.className = "fold";
+        fold.type = "button";
+        fold.textContent = node.expanded ? "▾" : "▸";
+        fold.title = node.kind === "connection"
+          ? "Свернуть или развернуть подключение"
+          : "Свернуть или развернуть группу";
+        fold.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toggle(node.id);
+        });
+        element.append(fold);
+        element.insertAdjacentHTML(
+          "beforeend",
+          node.kind === "group" ? folderIcon : terminalIcon,
+        );
+      }
+
+      const name = document.createElement("span");
+      name.className = "name";
+      const mark = node.kind === "session" && node.tone !== "closed" ? "● " : "";
+      name.textContent = mark + node.name;
+      element.append(name);
+
+      if (node.kind === "connection") {
+        const add = document.createElement("button");
+        add.className = "add";
+        add.type = "button";
+        add.textContent = "+";
+        add.title = "Новая сессия на этом подключении";
+        add.addEventListener("click", (event) => {
+          event.stopPropagation();
+          addSession(node.id);
+        });
+        element.append(add);
+      }
+
+      element.addEventListener("click", () => activate(node.id));
+      element.addEventListener("contextmenu", (event) => openMenu(event, node));
+      return element;
+    }
+
+    function activate(id) {
+      const hit = find(id);
+      if (!hit) return;
+      if (hit.node.kind === "group" || hit.node.kind === "connection") {
+        hit.node.expanded = !hit.node.expanded;
+      } else {
+        activeId = id;
+      }
+      closeMenu();
+      render();
+    }
+
+    function toggle(id) {
+      const hit = find(id);
+      if (!hit) return;
+      hit.node.expanded = !hit.node.expanded;
+      render();
+    }
+
+    function addSession(connectionId) {
+      const hit = find(connectionId);
+      if (!hit || hit.node.kind !== "connection") return;
+      const count = hit.node.children.length + 1;
+      hit.node.children.push({
+        id: "s-new-" + seq,
+        kind: "session",
+        name: "сессия " + count,
+        tone: "ready",
+      });
+      seq += 1;
+      hit.node.expanded = true;
+      render();
+    }
+
+    function rename(id) {
+      const hit = find(id);
+      if (!hit) return;
+      const next = prompt("Имя", hit.node.name);
+      if (next && next.trim()) hit.node.name = next.trim();
+      render();
+    }
+
+    function remove(id) {
+      const hit = find(id);
+      if (!hit) return;
+      hit.nodes.splice(hit.index, 1);
+      if (activeId === id) activeId = "lounge";
+      render();
+    }
+
+    function addGroup(parentId) {
+      const name = prompt("Имя папки", "подгруппа");
+      if (!name || !name.trim()) return;
+      const folder = {
+        id: "g-new-" + seq,
+        kind: "group",
+        name: name.trim(),
+        expanded: true,
+        children: [],
+      };
+      seq += 1;
+      if (!parentId) {
+        tree.push(folder);
+      } else {
+        const hit = find(parentId);
+        if (!hit) return;
+        hit.node.children.push(folder);
+        hit.node.expanded = true;
+      }
+      render();
+    }
+
+    function openMenu(event, node) {
+      if (node.kind === "lounge") return;
+      event.preventDefault();
+      closeMenu();
+      const menu = document.createElement("div");
+      menu.className = "menu";
+      const items = menuItems(node);
+      items.forEach(([title, action]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = title;
+        button.addEventListener("click", () => {
+          closeMenu();
+          action();
+        });
+        menu.append(button);
+      });
+      document.body.append(menu);
+      const width = 180;
+      const left = Math.min(event.clientX, window.innerWidth - width - 8);
+      const top = Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8);
+      menu.style.left = left + "px";
+      menu.style.top = top + "px";
+    }
+
+    function menuItems(node) {
+      if (node.kind === "group") {
+        return [
+          ["Переименовать", () => rename(node.id)],
+          ["Создать подгруппу", () => addGroup(node.id)],
+          ["Удалить", () => remove(node.id)],
+        ];
+      }
+      if (node.kind === "connection") {
+        return [
+          ["Параметры", () => {}],
+          ["Новая сессия", () => addSession(node.id)],
+          ["Переименовать", () => rename(node.id)],
+          ["Удалить", () => remove(node.id)],
+        ];
+      }
+      return [
+        ["Переименовать", () => rename(node.id)],
+        ["Удалить", () => remove(node.id)],
+      ];
+    }
+
+    function closeMenu() {
+      document.querySelectorAll(".menu").forEach((menu) => menu.remove());
+    }
+
+    document.addEventListener("click", closeMenu);
+    document.addEventListener("scroll", closeMenu, true);
+    render();
+  </script>
+</body>
+</html>

@@ -169,7 +169,10 @@ class ApplicationService:
         self._os_live: Dict[domain.SessionId, str] = {}
         self._os_snapshot: Dict[domain.SessionId, str] = {}
         self._groups: Dict[str, domain.ConnectionGroup] = {}
+        self._connections: Dict[str, domain.ConnectionInfo] = {}
+        self._logins: Dict[str, tuple] = {}
         self._order: Dict[str, List[str]] = {"": []}
+        self._load_connections()
         self._load_connection_layout()
         self._load_lounge()
 
@@ -196,6 +199,34 @@ class ApplicationService:
 
     def list_sessions(self) -> List[domain.SessionInfo]:
         return self._catalog.list()
+
+    def list_connections(self) -> List[domain.ConnectionInfo]:
+        return list(self._connections.values())
+
+    def get_connection(self, connection_id: str) -> Optional[domain.ConnectionInfo]:
+        return self._connections.get(connection_id)
+
+    def _mcp_base(self, info: domain.SessionInfo) -> str:
+        alias = info.mcp_alias.strip()
+        if alias:
+            return alias
+        connection = self._connections.get(info.connection_id)
+        if connection is not None and connection.name.strip():
+            return connection.name.strip()
+        return info.name.strip()
+
+    def mcp_label(self, info: domain.SessionInfo) -> str:
+        """Имя MCP. Одинаковая база у нескольких сессий дополняется именем сессии."""
+        base = self._mcp_base(info)
+        session_name = info.name.strip()
+        same = [
+            other
+            for other in self.list_sessions()
+            if self._mcp_base(other) == base
+        ]
+        if len(same) > 1 and session_name and session_name != base:
+            return f"{base} / {session_name}"
+        return base or session_name
 
     def connection_layout(self) -> domain.ConnectionLayout:
         groups = tuple(self._groups[key] for key in sorted(self._groups))
@@ -254,13 +285,20 @@ class ApplicationService:
         parent = parent_id.strip()
         if not node:
             raise ValueError("Нечего переносить")
-        if parent and parent not in self._groups:
-            raise ValueError("Группа не найдена")
         if node in self._groups:
+            if parent and parent not in self._groups:
+                raise ValueError("Группа не найдена")
             if parent == node or self._group_contains(node, parent):
                 raise ValueError("Группу нельзя вложить саму в себя")
-        elif self.get_session(node) is None:
-            raise ValueError("Сессия не найдена")
+        elif node in self._connections:
+            if parent and parent not in self._groups:
+                raise ValueError("Подключение можно положить только в папку или в корень")
+        else:
+            session = self.get_session(node)
+            if session is None:
+                raise ValueError("Сессия не найдена")
+            if parent != session.connection_id:
+                raise ValueError("Сессию можно переставлять только внутри своего подключения")
         old_parent, old_index = self._locate(node)
         self._detach_node(node)
         children = self._order.setdefault(parent, [])
@@ -281,6 +319,46 @@ class ApplicationService:
         self._groups[group_id] = replace(group, expanded=bool(expanded))
         self._store_connection_layout()
 
+    def set_connection_expanded(self, connection_id: str, expanded: bool) -> None:
+        connection = self._connections.get(connection_id)
+        if connection is None:
+            raise ValueError("Подключение не найдено")
+        updated = replace(connection, expanded=bool(expanded))
+        self._connections[connection_id] = updated
+        saver = getattr(self._catalog, "save_connection", None)
+        if callable(saver):
+            saver(updated)
+
+    def rename_connection(self, connection_id: str, name: str) -> None:
+        connection = self._connections.get(connection_id)
+        if connection is None:
+            raise ValueError("Подключение не найдено")
+        cleaned = " ".join(name.split())
+        if not cleaned:
+            raise ValueError("Имя подключения не может быть пустым")
+        updated = replace(connection, name=cleaned)
+        self._connections[connection_id] = updated
+        saver = getattr(self._catalog, "save_connection", None)
+        if callable(saver):
+            saver(updated)
+
+    def _load_connections(self) -> None:
+        lister = getattr(self._catalog, "list_connections", None)
+        self._connections = {}
+        if not callable(lister):
+            return
+        saver = getattr(self._catalog, "save_connection", None)
+        for connection in lister():
+            if not connection.connection_id:
+                continue
+            # Журналы внутри подключения при каждом запуске скрыты.
+            # Раскрытие в этом сеансе по-прежнему запоминается до выхода.
+            if connection.expanded:
+                connection = replace(connection, expanded=False)
+                if callable(saver):
+                    saver(connection)
+            self._connections[connection.connection_id] = connection
+
     def _load_connection_layout(self) -> None:
         loader = getattr(self._catalog, "load_layout", None)
         raw = loader() if callable(loader) else domain.ConnectionLayout()
@@ -288,12 +366,19 @@ class ApplicationService:
         self._order = {"": []}
         if raw is None:
             return
+        collapsed = False
         for group in raw.groups:
             if group.group_id and group.group_id not in self._groups:
+                # Папки при каждом запуске свёрнуты, как и чаты внутри подключений.
+                if group.expanded:
+                    group = replace(group, expanded=False)
+                    collapsed = True
                 self._groups[group.group_id] = group
         for parent, children in raw.order:
             self._order[parent] = list(children)
         self._normalize_layout()
+        if collapsed:
+            self._store_connection_layout()
 
     def _store_connection_layout(self) -> None:
         saver = getattr(self._catalog, "save_layout", None)
@@ -314,6 +399,9 @@ class ApplicationService:
                     self._groups[child] = replace(self._groups[child], parent_id=parent)
                     self._order.setdefault(child, [])
                     walk(child, trail | {child})
+                elif child in self._connections:
+                    self._order.setdefault(child, [])
+                    walk(child, trail | {child})
             self._order[parent] = cleaned
 
         self._order.setdefault("", [])
@@ -327,7 +415,7 @@ class ApplicationService:
             self._order.setdefault(group_id, [])
             walk(group_id, {group_id})
         for parent in list(self._order):
-            if parent and parent not in self._groups:
+            if parent and parent not in self._groups and parent not in self._connections:
                 for child in self._order[parent]:
                     if child not in seen:
                         self._order[""].append(child)
@@ -365,6 +453,61 @@ class ApplicationService:
             return
         self._order.setdefault("", []).append(session_id)
         self._store_connection_layout()
+
+    def _place_connection(self, connection_id: str, session_id: str) -> None:
+        if not any(connection_id in children for children in self._order.values()):
+            self._order.setdefault("", []).append(connection_id)
+        children = self._order.setdefault(connection_id, [])
+        if session_id not in children:
+            children.append(session_id)
+        self._store_connection_layout()
+
+    def _cache_login(
+        self,
+        connection_id: str,
+        password: str,
+        auth_secret: Optional[str],
+        hop_secrets: tuple[str, ...],
+    ) -> None:
+        if not connection_id:
+            return
+        self._logins[connection_id] = (password, auth_secret, tuple(hop_secrets))
+
+    def _remember_connection(self, info: domain.SessionInfo) -> domain.ConnectionInfo:
+        """Держит в памяти машину, которую сессия только что сохранила."""
+        cid = info.connection_id
+        current = self._connections.get(cid)
+        connection = domain.ConnectionInfo(
+            connection_id=cid,
+            name=current.name if current is not None else info.name,
+            provider=info.provider,
+            identity=info.identity,
+            ssh=info.ssh,
+            mcp_alias=info.mcp_alias,
+            mcp_description=info.mcp_description,
+            os_name=info.os_name,
+            ip_addresses=info.ip_addresses,
+            username=info.username,
+            shell_family=info.shell_family,
+            expanded=current.expanded if current is not None else False,
+        )
+        self._connections[cid] = connection
+        for sid, current in list(self._sessions.items()):
+            if current.connection_id != cid:
+                continue
+            self._sessions[sid] = replace(
+                current,
+                provider=connection.provider,
+                identity=connection.identity,
+                ssh=connection.ssh,
+                mcp_alias=connection.mcp_alias,
+                mcp_description=connection.mcp_description,
+                os_name=connection.os_name,
+                ip_addresses=connection.ip_addresses,
+                username=connection.username,
+                shell_family=connection.shell_family,
+            )
+        return connection
 
     def _forget_session_node(self, session_id: str) -> None:
         self._detach_node(session_id)
@@ -463,6 +606,7 @@ class ApplicationService:
             shell_family=family,
         )
         self._catalog.save(updated)
+        self._remember_connection(updated)
         with self._lock:
             current = self._sessions.get(session_id)
             if current is not None:
@@ -847,6 +991,15 @@ class ApplicationService:
             updated = resolved()
             if updated is not None:
                 saved_ssh = updated
+        connection_id = domain.new_connection_id()
+        self._connections[connection_id] = domain.ConnectionInfo(
+            connection_id=connection_id,
+            name=config.name,
+            provider=config.provider,
+            identity=config.identity,
+            ssh=saved_ssh,
+            shell_family=domain.normalize_shell_family(shell_family),
+        )
         info = domain.SessionInfo(
             session_id=session_id,
             name=config.name,
@@ -856,14 +1009,17 @@ class ApplicationService:
             ssh=saved_ssh,
             llm_profile_id=llm_profile_id,
             shell_family=domain.normalize_shell_family(shell_family),
+            connection_id=connection_id,
         )
         try:
             self._catalog.save(info)
         except Exception:
             driver.close()
             self._journal.delete(session_id)
+            self._connections.pop(connection_id, None)
             raise
-        self._remember_session_node(session_id)
+        self._place_connection(connection_id, session_id)
+        self._cache_login(connection_id, password, auth_secret, hop_secrets)
 
         with self._lock:
             self._drivers[session_id] = driver
@@ -934,6 +1090,8 @@ class ApplicationService:
             raise self._fail_open(driver, stored, ssh, exc) from exc
 
         info = replace(stored, status=domain.SessionStatus.READY, ssh=ssh)
+        self._remember_connection(info)
+        self._cache_login(info.connection_id, password, auth_secret, hop_secrets)
         with self._lock:
             self._drivers[session_id] = driver
             self._sessions[session_id] = info
@@ -942,6 +1100,99 @@ class ApplicationService:
             self._offline_reason.pop(session_id, None)
         self._maybe_probe_os(session_id)
         return info
+
+    def add_session(
+        self,
+        connection_id: str,
+        name: str,
+        password: str = "",
+        auth_secret: Optional[str] = None,
+        hop_secrets: tuple[str, ...] = (),
+    ) -> domain.SessionInfo:
+        """Новый терминал на уже сохранённом подключении. Модель выбирается в чате."""
+        connection = self._connections.get(connection_id)
+        if connection is None:
+            raise ValueError("Подключение не найдено")
+        cleaned = " ".join(name.split())
+        if not cleaned:
+            raise ValueError("Имя сессии не может быть пустым")
+        cached = self._logins.get(connection_id)
+        journal = password or (cached[0] if cached else "")
+        if not journal:
+            view = self._connection_view(connection)
+            if self.opens_with_master_passphrase(view):
+                journal = self.master_password()
+            else:
+                raise ValueError("Нужен пароль подключения")
+        secret = cached[1] if cached is not None and auth_secret is None else auth_secret
+        hops = cached[2] if cached is not None and not hop_secrets else hop_secrets
+        if connection.provider in (
+            domain.ProviderType.SSH,
+            domain.ProviderType.SSH_OVER_SSH,
+        ):
+            secret, hops = self._with_master_passphrase(connection.ssh, secret, hops)
+            self._check_ssh(connection.provider, connection.ssh, secret, hops)
+        session_id = domain.new_session_id()
+        config = domain.SessionConfig(
+            session_id=session_id,
+            name=cleaned,
+            provider=connection.provider,
+            identity=connection.identity,
+            ssh=connection.ssh,
+            auth_secret=secret,
+            hop_secrets=hops,
+            identity_passphrase=self._master_key_passphrase(),
+        )
+        self._journal.create(session_id, journal)
+        driver = self._driver_factory(config.provider)
+        driver.set_event_sink(self._handle_driver_event)
+        try:
+            driver.open(config)
+        except Exception:
+            self._journal.delete(session_id)
+            raise
+        info = domain.SessionInfo(
+            session_id=session_id,
+            name=cleaned,
+            provider=connection.provider,
+            identity=connection.identity,
+            status=domain.SessionStatus.READY,
+            ssh=connection.ssh,
+            shell_family=connection.shell_family,
+            mcp_alias=connection.mcp_alias,
+            mcp_description=connection.mcp_description,
+            os_name=connection.os_name,
+            ip_addresses=connection.ip_addresses,
+            username=connection.username,
+            connection_id=connection.connection_id,
+        )
+        try:
+            self._catalog.save(info)
+        except Exception:
+            driver.close()
+            self._journal.delete(session_id)
+            raise
+        self._place_connection(connection.connection_id, session_id)
+        self._cache_login(connection.connection_id, journal, secret, hops)
+        with self._lock:
+            self._drivers[session_id] = driver
+            self._sessions[session_id] = info
+            self._states[session_id] = domain.SessionStatus.READY
+            self._sequences[session_id] = self._journal.next_sequence(session_id)
+        self._maybe_probe_os(session_id)
+        return info
+
+    def _connection_view(self, connection: domain.ConnectionInfo) -> domain.SessionInfo:
+        return domain.SessionInfo(
+            session_id="",
+            name=connection.name,
+            provider=connection.provider,
+            identity=connection.identity,
+            status=domain.SessionStatus.CLOSED,
+            ssh=connection.ssh,
+            shell_family=connection.shell_family,
+            connection_id=connection.connection_id,
+        )
 
     def reconnect_session(
         self,
@@ -996,6 +1247,10 @@ class ApplicationService:
             raise self._fail_open(driver, stored, ssh, exc) from exc
 
         info = replace(stored, status=domain.SessionStatus.READY, ssh=ssh)
+        self._remember_connection(info)
+        cached = self._logins.get(info.connection_id)
+        journal = cached[0] if cached else ""
+        self._cache_login(info.connection_id, journal, auth_secret, hop_secrets)
         with self._lock:
             self._drivers[session_id] = driver
             self._sessions[session_id] = info
@@ -1092,6 +1347,29 @@ class ApplicationService:
         self._journal.delete(session_id)
         self._catalog.delete(session_id)
         self._forget_session_node(session_id)
+
+    def delete_connection(self, connection_id: str) -> None:
+        """Удаляет подключение и все его сессии вместе с журналами."""
+        if connection_id not in self._connections and self.get_connection(connection_id) is None:
+            raise ValueError("Подключение не найдено")
+        sessions = [
+            info
+            for info in self.list_sessions()
+            if info.connection_id == connection_id
+        ]
+        for info in sessions:
+            if self.session_state(info.session_id) == "running":
+                raise RuntimeError("В одной из сессий выполняется команда")
+        for info in sessions:
+            self.delete_session(info.session_id)
+        self._connections.pop(connection_id, None)
+        self._logins.pop(connection_id, None)
+        self._order.pop(connection_id, None)
+        self._detach_node(connection_id)
+        remover = getattr(self._catalog, "delete_connection", None)
+        if callable(remover):
+            remover(connection_id)
+        self._store_connection_layout()
 
     def close_all(self) -> None:
         with self._lock:
@@ -1940,9 +2218,15 @@ class ApplicationService:
                 return refusal_reason(INTERACTIVE_REASON), output, watch.code
             return finished_text(watch.code, output), output, watch.code
         finally:
+            command_id = watch.command_id or ""
             with self._lock:
                 if self._mcp_watch.get(session_id) is watch:
                     self._mcp_watch.pop(session_id, None)
+            if command_id:
+                try:
+                    self.hide_command(session_id, command_id)
+                except Exception:
+                    pass
 
     def _execute_mcp_command(
         self,
@@ -1957,7 +2241,7 @@ class ApplicationService:
         if lounge_tab:
             info = self.get_session(session_id)
             if info is not None:
-                mcp = info.mcp_alias.strip() or info.name
+                mcp = self.mcp_label(info)
         try:
             self.record_tool_outcome(
                 session_id,
@@ -1967,6 +2251,11 @@ class ApplicationService:
         except Exception:
             pass
         return model_text
+
+    def mcp_blocks_terminal(self, session_id: domain.SessionId) -> bool:
+        """Пока команда идёт из чата модели, лента терминала её не показывает."""
+        with self._lock:
+            return session_id in self._mcp_watch
 
     def hides_terminal_command(self, command_id: str) -> bool:
         """Команда модели не попадает в ленту терминала."""
@@ -2175,7 +2464,9 @@ class ApplicationService:
             return
         stored = self._catalog.get(session_id)
         if stored is not None and stored.os_name != cleaned:
-            self._catalog.save(replace(stored, os_name=cleaned))
+            saved = replace(stored, os_name=cleaned)
+            self._catalog.save(saved)
+            self._remember_connection(saved)
         with self._lock:
             current = self._sessions.get(session_id)
             if current is not None and current.os_name != cleaned:
@@ -2270,6 +2561,7 @@ class ApplicationService:
             return
         updated = replace(info, ip_addresses=joined, mcp_description=description)
         self._catalog.save(updated)
+        self._remember_connection(updated)
         with self._lock:
             if session_id in self._sessions:
                 self._sessions[session_id] = updated
@@ -2283,6 +2575,7 @@ class ApplicationService:
             return
         updated = replace(info, username=cleaned)
         self._catalog.save(updated)
+        self._remember_connection(updated)
         with self._lock:
             if session_id in self._sessions:
                 self._sessions[session_id] = updated
@@ -2497,7 +2790,7 @@ class ApplicationService:
         for info in self._lounge_targets():
             entries.append(
                 (
-                    info.mcp_alias.strip() or info.name,
+                    self.mcp_label(info),
                     info.mcp_description,
                     self.mcp_endpoint(info.session_id),
                 )
@@ -2573,7 +2866,7 @@ class ApplicationService:
                 names = []
                 os_by_name = {}
                 for info in targets:
-                    label = info.mcp_alias.strip() or info.name
+                    label = self.mcp_label(info)
                     names.append(label)
                     os_by_name.setdefault(label, self._session_os(info.session_id))
                 answer, warning = self._complete_with_tools(
@@ -2711,7 +3004,7 @@ class ApplicationService:
             info = self._mcp_by_label(name)
             if info is None:
                 return f"Подключи MCP «{name}». ОС не определена."
-            label = info.mcp_alias.strip() or info.name
+            label = self.mcp_label(info)
             sentence = f"Подключи MCP «{label}»."
             description = info.mcp_description.strip()
             if description:
@@ -2723,15 +3016,15 @@ class ApplicationService:
 
     def _mcp_by_label(self, name: str) -> Optional[domain.SessionInfo]:
         for info in self.list_sessions():
-            label = info.mcp_alias.strip() or info.name
-            if name == label or name == info.name or name == info.session_id:
+            label = self.mcp_label(info)
+            if name in (label, self._mcp_base(info), info.name, info.session_id):
                 return info
         return None
 
     def _lounge_system(self) -> str:
         lines = []
         for info in self._lounge_targets():
-            label = info.mcp_alias.strip() or info.name
+            label = self.mcp_label(info)
             details = []
             if info.mcp_description.strip():
                 details.append(info.mcp_description.strip())
@@ -2764,8 +3057,13 @@ class ApplicationService:
         wanted = " ".join(target.split())
         matches = []
         for info in self._lounge_targets():
-            label = info.mcp_alias.strip() or info.name
-            if wanted and wanted in (label, info.name, info.session_id):
+            label = self.mcp_label(info)
+            if wanted and wanted in (
+                label,
+                self._mcp_base(info),
+                info.name,
+                info.session_id,
+            ):
                 matches.append(info.session_id)
         if not wanted:
             return refusal_reason("не указан MCP")

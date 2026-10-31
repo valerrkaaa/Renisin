@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Чат с ИИ</title>
+<style>
+  :root{
+    --bg:#1f1f1f;
+    --sidebar-bg:#181818;
+    --surface:#262626;
+    --activity:#101113;
+    --text:#e4e4e7;
+    --muted:#8b8d97;
+    --faint:#6b6d78;
+    --border:#2e2f36;
+    --hover:#222328;
+    --active-bg:#1f2440;
+    --accent:#2f318f;
+    --accent-hover:#5d5ea8;
+    --radius:6px;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;color-scheme:dark;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-size:14px;
+    color:var(--text);
+    background:var(--bg);
+  }
+  .pane{
+    max-width:720px;
+    height:100vh;
+    margin:0 auto;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    padding:12px 16px 12px;
+  }
+  .head{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .head h1{
+    margin:0;
+    font-size:15px;
+    font-weight:600;
+  }
+  .grow{flex:1;}
+  .check{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    color:var(--text);
+    font-size:13px;
+    user-select:none;
+  }
+  .check input{accent-color:var(--accent);}
+  select, textarea, input[type="text"], input[type="number"]{
+    font:inherit;
+    color:var(--text);
+    background:var(--bg);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:6px 8px;
+  }
+  select{min-width:160px;}
+  .aux, .usage{
+    border:1px solid var(--border);
+    background:var(--surface);
+    color:var(--text);
+    font:600 12px inherit;
+    padding:6px 10px;
+    border-radius:var(--radius);
+    cursor:pointer;
+  }
+  .aux:hover, .usage:hover{background:var(--active-bg);border-color:var(--accent);}
+  .limit{
+    width:88px;
+  }
+  .thread{
+    flex:1;
+    overflow:auto;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    padding:4px 4px 8px;
+  }
+  .user{
+    align-self:flex-end;
+    max-width:320px;
+    padding:8px 10px;
+    border-radius:var(--radius);
+    background:var(--active-bg);
+    color:var(--text);
+    white-space:pre-wrap;
+  }
+  .assistant{white-space:pre-wrap;line-height:1.45;}
+  .note{cursor:pointer;}
+  .note .summary{
+    color:var(--muted);
+    white-space:pre-wrap;
+    line-height:1.4;
+  }
+  .note .body{
+    display:none;
+    margin:6px 0 0 12px;
+    white-space:pre-wrap;
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12px;
+  }
+  .note.open .body{display:block;}
+  .confirm{
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    background:var(--surface);
+    padding:8px 10px 10px;
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+  }
+  .confirm h2{
+    margin:0;
+    font-size:12px;
+    font-weight:600;
+  }
+  .meta{color:var(--muted);font-size:13px;}
+  .intent{line-height:1.4;}
+  .code, .output{
+    margin:0;
+    padding:8px 10px;
+    border-radius:var(--radius);
+    background:var(--activity);
+    color:var(--muted);
+    border:1px solid var(--border);
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12px;
+    white-space:pre-wrap;
+  }
+  .output{
+    width:100%;
+    min-height:96px;
+    max-height:220px;
+    resize:vertical;
+  }
+  .output[readonly]{background:var(--activity);color:var(--muted);}
+  .actions{display:flex;gap:8px;flex-wrap:wrap;}
+  .reason{display:none;gap:8px;}
+  .reason.show{display:flex;}
+  .reason input{flex:1;}
+  .composer{
+    display:flex;
+    gap:8px;
+    align-items:flex-end;
+    padding:6px 8px 6px 10px;
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    background:var(--bg);
+  }
+  .composer textarea{
+    flex:1;
+    resize:none;
+    min-height:40px;
+    border:none;
+    background:transparent;
+    outline:none;
+  }
+  .send{
+    border:none;
+    background:var(--accent);
+    color:#fff;
+    font:600 13px inherit;
+    padding:8px 14px;
+    border-radius:var(--radius);
+    cursor:pointer;
+  }
+  .send:hover{background:var(--accent-hover);}
+  .model-name{color:var(--muted);font-size:12px;}
+</style>
+</head>
+<body>
+  <section class="pane">
+    <header class="head">
+      <h1>Чат</h1>
+      <span class="grow"></span>
+      <select id="model">
+        <option>claude-sonnet</option>
+        <option>gpt-4.1</option>
+      </select>
+      <label class="check"><input type="checkbox" checked> Авто</label>
+      <label class="check"><input type="checkbox" id="review" checked> Просмотр</label>
+      <button class="aux" id="clear" type="button">Очистить</button>
+      <button class="usage" id="usage" type="button">~1.2k / 8000</button>
+      <input class="limit" id="limit" type="number" value="8000" hidden>
+    </header>
+    <div class="thread" id="thread"></div>
+    <div class="model-name" id="model-name">claude-sonnet</div>
+    <form class="composer" id="composer">
+      <textarea id="draft" rows="2" placeholder="Промпт... Enter — отправить, Shift+Enter — новая строка"></textarea>
+      <button class="send" type="submit">Отправить</button>
+    </form>
+  </section>
+<script>
+const history = [
+  { kind: "user", text: "сколько машина уже работает" },
+  { kind: "assistant", text: "Спрошу uptime на этом подключении." },
+  {
+    kind: "note",
+    status: "выполнено",
+    mcp: "ноутбук",
+    command: "uptime",
+    output: " 20:11:02 up 4 days, 3:12, 2 users, load average: 0.18, 0.22, 0.19"
+  },
+  { kind: "user", text: "а место на диске?" },
+  { kind: "assistant", text: "Команда уже выполнена. Вывод ждет отправки." }
+];
+
+const pending = {
+  mcp: "ноутбук",
+  intent: "Показать занятость корневого раздела",
+  command: "df -h /",
+  output: "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  460G  210G  227G  49% /"
+};
+
+const thread = document.getElementById("thread");
+
+function note(item) {
+  const block = document.createElement("div");
+  block.className = "note";
+  const summary = document.createElement("div");
+  summary.className = "summary";
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = item.command + "\n\n" + item.output;
+  const paint = () => {
+    const mark = block.classList.contains("open") ? "v" : ">";
+    summary.textContent = item.status + ": " + item.mcp + "\n" + mark + " " + item.command;
+  };
+  paint();
+  block.append(summary, body);
+  block.addEventListener("click", () => {
+    block.classList.toggle("open");
+    paint();
+  });
+  return block;
+}
+
+function confirmCard() {
+  const card = document.createElement("section");
+  card.className = "confirm";
+  card.innerHTML = `
+    <h2>Подтверждение отправки</h2>
+    <div class="meta">MCP: ${pending.mcp}</div>
+    <div class="intent">${pending.intent}</div>
+    <pre class="code">${pending.command}</pre>
+    <textarea class="output" readonly></textarea>
+    <div class="actions">
+      <button class="aux" type="button" data-act="send">Отправить</button>
+      <button class="aux" type="button" data-act="redact">Обезличить</button>
+      <button class="aux" type="button" data-act="reject">Отклонить по причине</button>
+    </div>
+    <form class="reason">
+      <input type="text" placeholder="Почему вывод не отправлять">
+      <button class="aux" type="submit">Отправить отказ</button>
+    </form>
+  `;
+  const output = card.querySelector(".output");
+  output.value = pending.output;
+  const reason = card.querySelector(".reason");
+
+  card.querySelector('[data-act="redact"]').addEventListener("click", () => {
+    output.readOnly = false;
+    output.focus();
+  });
+  card.querySelector('[data-act="reject"]').addEventListener("click", () => {
+    reason.classList.add("show");
+    reason.querySelector("input").focus();
+  });
+  card.querySelector('[data-act="send"]').addEventListener("click", () => {
+    history.push({
+      kind: "note",
+      status: "выполнено",
+      mcp: pending.mcp,
+      command: pending.command,
+      output: output.value
+    });
+    history.push({ kind: "assistant", text: "Вывод принят. На корне занято около половины диска." });
+    card.remove();
+    render();
+  });
+  reason.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const why = reason.querySelector("input").value.trim() || "без пояснения";
+    history.push({
+      kind: "note",
+      status: "отклонено",
+      mcp: pending.mcp,
+      command: pending.command,
+      output: why
+    });
+    card.remove();
+    render();
+  });
+  return card;
+}
+
+function render() {
+  thread.innerHTML = "";
+  history.forEach((item) => {
+    if (item.kind === "note") {
+      thread.append(note(item));
+      return;
+    }
+    const node = document.createElement("div");
+    node.className = item.kind;
+    node.textContent = item.text;
+    thread.append(node);
+  });
+  if (!history.some((item) => item.kind === "note" && item.command === pending.command && item.status !== "ожидает")) {
+    const waiting = history.some((item) => item.command === pending.command);
+    if (!waiting) thread.append(confirmCard());
+  }
+  thread.scrollTop = thread.scrollHeight;
+}
+
+document.getElementById("composer").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const draft = document.getElementById("draft");
+  const text = draft.value.trim();
+  if (!text) return;
+  history.push({ kind: "user", text });
+  history.push({ kind: "assistant", text: "Записала. Если нужна команда, она появится запросом на подтверждение." });
+  draft.value = "";
+  render();
+});
+document.getElementById("draft").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    document.getElementById("composer").requestSubmit();
+  }
+});
+document.getElementById("clear").addEventListener("click", () => {
+  history.length = 0;
+  render();
+});
+document.getElementById("usage").addEventListener("click", () => {
+  const field = document.getElementById("limit");
+  field.hidden = !field.hidden;
+  if (!field.hidden) field.focus();
+});
+document.getElementById("model").addEventListener("change", (event) => {
+  document.getElementById("model-name").textContent = event.target.value;
+});
+
+render();
+</script>
+</body>
+</html>

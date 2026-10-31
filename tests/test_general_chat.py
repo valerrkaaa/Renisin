@@ -184,7 +184,8 @@ class GeneralChatTests(unittest.TestCase):
             '"url": "http://127.0.0.1:9/mcp/b"\n'
             "},",
         )
-        self.assertEqual(len(page.findChildren(QFrame, "loungeRule")), 2)
+        self.assertIsNotNone(page.findChild(QWidget, "loungeTabBar"))
+        self.assertIsNotNone(page.findChild(QWidget, "loungeHead"))
         page.set_messages(
             page.current_tab_id(),
             [("user", "запрос альфа"), ("assistant", "ответ бета")],
@@ -241,7 +242,8 @@ class GeneralChatTests(unittest.TestCase):
         self.assertFalse(any(item.isVisible() for item in page.findChildren(CommandCard)))
         label = page.findChild(QLabel, "toolCall")
         self.assertIsNotNone(label)
-        self.assertEqual(label.text(), "выполнено: консоль\n> ls")
+        self.assertEqual(label.text(), "консоль: ls")
+        self.assertEqual(label.parent().findChild(QLabel, "noteMcp").text(), "консоль")
         body = label.parent().findChild(QTextEdit, "commandOutput").parent()
         self.assertTrue(body.isHidden())
         QTest.mouseClick(label, Qt.MouseButton.LeftButton)
@@ -267,7 +269,8 @@ class GeneralChatTests(unittest.TestCase):
         self.assertFalse(any(not item.isHidden() for item in page.findChildren(CommandCard)))
         label = page.findChild(QLabel, "toolCall")
         self.assertIsNotNone(label)
-        self.assertEqual(label.text(), "выполнено: консоль\n> ls")
+        self.assertEqual(label.text(), "консоль: ls")
+        self.assertEqual(label.parent().findChild(QLabel, "noteMcp").text(), "консоль")
         body = label.parent().findChild(QTextEdit, "commandOutput").parent()
         self.assertTrue(body.isHidden())
         QTest.mouseClick(label, Qt.MouseButton.LeftButton)
@@ -278,7 +281,8 @@ class GeneralChatTests(unittest.TestCase):
         QApplication.processEvents()
         again = page.findChild(QLabel, "toolCall")
         self.assertIsNotNone(again)
-        self.assertEqual(again.text(), "выполнено: консоль\n> ls")
+        self.assertEqual(again.text(), "консоль: ls")
+        self.assertEqual(again.parent().findChild(QLabel, "noteMcp").text(), "консоль")
         self.assertTrue(again.parent().findChild(QTextEdit, "commandOutput").parent().isHidden())
         page.close()
 
@@ -382,5 +386,6 @@ class GeneralChatTests(unittest.TestCase):
         self.assertLess(assistant.height(), 80)
         self.assertEqual(user.toPlainText(), "какой аптайм")
         self.assertEqual(assistant.toPlainText(), "Сейчас проверю.")
-        self.assertEqual(note.text(), "выполнено: local\n> uptime")
+        self.assertEqual(note.text(), "local: uptime")
+        self.assertEqual(note.parent().findChild(QLabel, "noteMcp").text(), "local")
         page.close()

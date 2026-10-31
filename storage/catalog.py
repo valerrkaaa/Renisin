@@ -27,7 +27,11 @@ class FileSessionCatalog:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        if _migrate_connections(data):
+            self._write(data)
+        return data
 
     def _write(self, data: dict) -> None:
         tmp = self._path + ".tmp"
@@ -43,9 +47,20 @@ class FileSessionCatalog:
             return {}
         return sessions
 
+    def _load_connections(self) -> Dict[str, dict]:
+        raw = self._read().get("connections")
+        if not isinstance(raw, dict):
+            return {}
+        return raw
+
     def _save(self, sessions: Dict[str, dict]) -> None:
         data = self._read()
         data["sessions"] = sessions
+        self._write(data)
+
+    def _save_connections(self, connections: Dict[str, dict]) -> None:
+        data = self._read()
+        data["connections"] = connections
         self._write(data)
 
     @staticmethod
@@ -112,73 +127,200 @@ class FileSessionCatalog:
         )
 
     @classmethod
-    def _to_dict(cls, info: domain.SessionInfo) -> dict:
-        d = {
-            "session_id": info.session_id,
+    def _connection_to_dict(cls, info: domain.ConnectionInfo) -> dict:
+        payload = {
+            "connection_id": info.connection_id,
             "name": info.name,
             "provider": info.provider.value,
             "identity": info.identity.value,
-            "status": info.status.value,
+            "mcp_alias": info.mcp_alias,
+            "mcp_description": info.mcp_description,
+            "os_name": info.os_name,
+            "ip_addresses": info.ip_addresses,
+            "username": info.username,
+            "shell_family": domain.normalize_shell_family(info.shell_family),
+            "expanded": bool(info.expanded),
         }
         if info.ssh is not None:
-            d["ssh"] = cls._ssh_to_dict(info.ssh)
-        if info.llm_profile_id:
-            d["llm_profile_id"] = info.llm_profile_id
-        if info.mcp_alias:
-            d["mcp_alias"] = info.mcp_alias
-        if info.mcp_description:
-            d["mcp_description"] = info.mcp_description
-        if info.os_name:
-            d["os_name"] = info.os_name
-        if info.ip_addresses:
-            d["ip_addresses"] = info.ip_addresses
-        if info.username:
-            d["username"] = info.username
-        d["shell_family"] = domain.normalize_shell_family(info.shell_family)
-        return d
+            payload["ssh"] = cls._ssh_to_dict(info.ssh)
+        return payload
 
     @classmethod
-    def _from_dict(cls, d: dict) -> domain.SessionInfo:
+    def _connection_from_dict(cls, raw: dict) -> domain.ConnectionInfo:
         ssh = None
-        raw_ssh = d.get("ssh")
-        if raw_ssh:
+        raw_ssh = raw.get("ssh")
+        if isinstance(raw_ssh, dict):
             ssh = cls._ssh_from_dict(raw_ssh)
-        return domain.SessionInfo(
-            session_id=d["session_id"],
-            name=d["name"],
-            provider=domain.ProviderType(d["provider"]),
-            identity=domain.ExecutionIdentityType(d["identity"]),
-            status=domain.SessionStatus(d["status"]),
+        provider = str(raw.get("provider") or domain.ProviderType.CMD.value)
+        try:
+            kind = domain.ProviderType(provider)
+        except ValueError:
+            kind = domain.ProviderType.CMD
+        identity = str(raw.get("identity") or domain.ExecutionIdentityType.CURRENT_USER.value)
+        try:
+            who = domain.ExecutionIdentityType(identity)
+        except ValueError:
+            who = domain.ExecutionIdentityType.CURRENT_USER
+        return domain.ConnectionInfo(
+            connection_id=str(raw.get("connection_id") or ""),
+            name=str(raw.get("name") or ""),
+            provider=kind,
+            identity=who,
             ssh=ssh,
-            llm_profile_id=d.get("llm_profile_id") or None,
-            mcp_alias=str(d.get("mcp_alias") or ""),
-            mcp_description=str(d.get("mcp_description") or ""),
-            os_name=str(d.get("os_name") or ""),
-            ip_addresses=str(d.get("ip_addresses") or ""),
-            username=str(d.get("username") or ""),
-            shell_family=domain.normalize_shell_family(str(d.get("shell_family") or "")),
+            mcp_alias=str(raw.get("mcp_alias") or ""),
+            mcp_description=str(raw.get("mcp_description") or ""),
+            os_name=str(raw.get("os_name") or ""),
+            ip_addresses=str(raw.get("ip_addresses") or ""),
+            username=str(raw.get("username") or ""),
+            shell_family=domain.normalize_shell_family(str(raw.get("shell_family") or "")),
+            expanded=bool(raw.get("expanded", False)),
         )
+
+    @classmethod
+    def _session_to_dict(cls, info: domain.SessionInfo) -> dict:
+        payload = {
+            "session_id": info.session_id,
+            "name": info.name,
+            "connection_id": info.connection_id,
+            "status": info.status.value,
+        }
+        if info.llm_profile_id:
+            payload["llm_profile_id"] = info.llm_profile_id
+        return payload
+
+    def _blend(self, raw: dict, connections: Dict[str, dict]) -> domain.SessionInfo:
+        cid = str(raw.get("connection_id") or "")
+        conn_raw = connections.get(cid) if cid else None
+        conn = self._connection_from_dict(conn_raw) if isinstance(conn_raw, dict) else None
+        status = str(raw.get("status") or domain.SessionStatus.CLOSED.value)
+        try:
+            state = domain.SessionStatus(status)
+        except ValueError:
+            state = domain.SessionStatus.CLOSED
+        info = domain.SessionInfo(
+            session_id=str(raw.get("session_id") or ""),
+            name=str(raw.get("name") or ""),
+            provider=conn.provider if conn is not None else domain.ProviderType.CMD,
+            identity=(
+                conn.identity
+                if conn is not None
+                else domain.ExecutionIdentityType.CURRENT_USER
+            ),
+            status=state,
+            ssh=conn.ssh if conn is not None else None,
+            llm_profile_id=raw.get("llm_profile_id") or None,
+            mcp_alias=conn.mcp_alias if conn is not None else "",
+            mcp_description=conn.mcp_description if conn is not None else "",
+            os_name=conn.os_name if conn is not None else "",
+            ip_addresses=conn.ip_addresses if conn is not None else "",
+            username=conn.username if conn is not None else "",
+            shell_family=conn.shell_family if conn is not None else domain.SHELL_UNIX,
+            connection_id=cid,
+        )
+        return info
 
     # --- SessionCatalog ---------------------------------------------------
 
     def save(self, info: domain.SessionInfo) -> None:
         with self._lock:
             sessions = self._load()
-            sessions[info.session_id] = self._to_dict(info)
-            self._save(sessions)
+            connections = self._load_connections()
+            cid = info.connection_id.strip()
+            if not cid:
+                cid = domain.connection_id_for_session(info.session_id)
+                info = domain.SessionInfo(
+                    session_id=info.session_id,
+                    name=info.name,
+                    provider=info.provider,
+                    identity=info.identity,
+                    status=info.status,
+                    ssh=info.ssh,
+                    llm_profile_id=info.llm_profile_id,
+                    mcp_alias=info.mcp_alias,
+                    mcp_description=info.mcp_description,
+                    os_name=info.os_name,
+                    ip_addresses=info.ip_addresses,
+                    username=info.username,
+                    shell_family=info.shell_family,
+                    connection_id=cid,
+                )
+            current = connections.get(cid)
+            if isinstance(current, dict):
+                kept = self._connection_from_dict(current)
+                name = kept.name
+                expanded = kept.expanded
+            else:
+                name = info.name
+                expanded = False
+            connections[cid] = self._connection_to_dict(
+                domain.ConnectionInfo(
+                    connection_id=cid,
+                    name=name,
+                    provider=info.provider,
+                    identity=info.identity,
+                    ssh=info.ssh,
+                    mcp_alias=info.mcp_alias,
+                    mcp_description=info.mcp_description,
+                    os_name=info.os_name,
+                    ip_addresses=info.ip_addresses,
+                    username=info.username,
+                    shell_family=info.shell_family,
+                    expanded=expanded,
+                )
+            )
+            sessions[info.session_id] = self._session_to_dict(info)
+            data = self._read()
+            data["sessions"] = sessions
+            data["connections"] = connections
+            self._write(data)
 
     def list(self) -> List[domain.SessionInfo]:
         with self._lock:
             sessions = self._load()
-            result = [self._from_dict(d) for d in sessions.values()]
+            connections = self._load_connections()
+            result = [self._blend(d, connections) for d in sessions.values()]
         result.sort(key=lambda s: s.name.lower())
         return result
 
     def get(self, session_id: domain.SessionId) -> Optional[domain.SessionInfo]:
         with self._lock:
             sessions = self._load()
-            d = sessions.get(session_id)
-            return self._from_dict(d) if d else None
+            raw = sessions.get(session_id)
+            if not isinstance(raw, dict):
+                return None
+            return self._blend(raw, self._load_connections())
+
+    def list_connections(self) -> List[domain.ConnectionInfo]:
+        with self._lock:
+            raw = self._load_connections()
+            result = [
+                self._connection_from_dict(item)
+                for item in raw.values()
+                if isinstance(item, dict) and str(item.get("connection_id") or "").strip()
+            ]
+        result.sort(key=lambda item: item.name.lower())
+        return result
+
+    def get_connection(self, connection_id: str) -> Optional[domain.ConnectionInfo]:
+        with self._lock:
+            raw = self._load_connections().get(connection_id)
+            if not isinstance(raw, dict):
+                return None
+            return self._connection_from_dict(raw)
+
+    def save_connection(self, info: domain.ConnectionInfo) -> None:
+        with self._lock:
+            connections = self._load_connections()
+            connections[info.connection_id] = self._connection_to_dict(info)
+            self._save_connections(connections)
+
+    def delete_connection(self, connection_id: str) -> None:
+        with self._lock:
+            connections = self._load_connections()
+            if connection_id not in connections:
+                return
+            del connections[connection_id]
+            self._save_connections(connections)
 
     def delete(self, session_id: domain.SessionId) -> None:
         with self._lock:
@@ -197,6 +339,67 @@ class FileSessionCatalog:
             data = self._read()
             data["layout"] = _layout_to_dict(layout)
             self._write(data)
+
+
+def _migrate_connections(data: dict) -> bool:
+    """Старая сессия была и подключением, и журналом. Делим запись один раз."""
+    sessions = data.get("sessions")
+    if not isinstance(sessions, dict):
+        return False
+    connections = data.get("connections")
+    if not isinstance(connections, dict):
+        connections = {}
+    layout = data.get("layout") if isinstance(data.get("layout"), dict) else None
+    order = None
+    if layout is not None and isinstance(layout.get("order"), dict):
+        order = layout["order"]
+    changed = False
+    for session_id, raw in list(sessions.items()):
+        if not isinstance(raw, dict) or raw.get("connection_id"):
+            continue
+        cid = domain.connection_id_for_session(str(session_id))
+        if cid not in connections:
+            connections[cid] = {
+                "connection_id": cid,
+                "name": raw.get("name") or session_id,
+                "provider": raw.get("provider") or domain.ProviderType.CMD.value,
+                "identity": raw.get("identity") or domain.ExecutionIdentityType.CURRENT_USER.value,
+                "mcp_alias": raw.get("mcp_alias") or "",
+                "mcp_description": raw.get("mcp_description") or "",
+                "os_name": raw.get("os_name") or "",
+                "ip_addresses": raw.get("ip_addresses") or "",
+                "username": raw.get("username") or "",
+                "shell_family": raw.get("shell_family") or domain.SHELL_UNIX,
+                "expanded": False,
+            }
+            if raw.get("ssh"):
+                connections[cid]["ssh"] = raw.get("ssh")
+        slim = {
+            "session_id": raw.get("session_id") or session_id,
+            "name": raw.get("name") or session_id,
+            "connection_id": cid,
+            "status": raw.get("status") or domain.SessionStatus.CLOSED.value,
+        }
+        if raw.get("llm_profile_id"):
+            slim["llm_profile_id"] = raw.get("llm_profile_id")
+        sessions[session_id] = slim
+        if order is not None:
+            for parent, children in list(order.items()):
+                if not isinstance(children, list) or session_id not in children:
+                    continue
+                order[parent] = [
+                    cid if str(child) == str(session_id) else child for child in children
+                ]
+            order[cid] = [str(session_id)]
+        changed = True
+    if not changed:
+        return False
+    data["sessions"] = sessions
+    data["connections"] = connections
+    if layout is not None and order is not None:
+        layout["order"] = order
+        data["layout"] = layout
+    return True
 
 
 def _layout_to_dict(layout: domain.ConnectionLayout) -> dict:

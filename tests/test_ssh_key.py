@@ -375,6 +375,15 @@ class KeyUiTests(unittest.TestCase):
         )
         QApplication.processEvents()
         self.assertFalse(second.install_key.isVisible())
+        second.auth.setCurrentIndex(
+            second.auth.findData(domain.SSHAuthMethod.PASSWORD.value)
+        )
+        QApplication.processEvents()
+        self.assertFalse(second.install_key.isVisible())
+        self.assertTrue(first.install_key.isVisible())
+        second.auth.setCurrentIndex(
+            second.auth.findData(domain.SSHAuthMethod.PRIVATE_KEY.value)
+        )
         first.install_key.setChecked(True)
         first.host.setText("10.0.0.1")
         first.user.setText("jump")

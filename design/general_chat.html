@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Общий чат</title>
+<style>
+  :root{
+    --bg:#1f1f1f;
+    --sidebar-bg:#181818;
+    --surface:#262626;
+    --activity:#101113;
+    --text:#e4e4e7;
+    --muted:#8b8d97;
+    --faint:#6b6d78;
+    --border:#2e2f36;
+    --hover:#222328;
+    --active-bg:#1f2440;
+    --accent:#2f318f;
+    --accent-hover:#5d5ea8;
+    --radius:6px;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;color-scheme:dark;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-size:14px;
+    color:var(--text);
+    background:var(--bg);
+    display:flex;
+    height:100vh;
+  }
+  .chat{
+    flex:1;
+    min-width:0;
+    display:flex;
+    flex-direction:column;
+    padding:8px 10px 10px 12px;
+    gap:12px;
+  }
+  .tabs{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    min-height:32px;
+  }
+  .tab{
+    display:flex;
+    align-items:center;
+    gap:2px;
+  }
+  .tab button.name{
+    border:none;
+    background:transparent;
+    color:var(--muted);
+    font:inherit;
+    padding:6px 8px;
+    border-radius:var(--radius);
+    cursor:pointer;
+  }
+  .tab.active button.name{
+    background:var(--active-bg);
+    color:var(--text);
+    font-weight:600;
+  }
+  .tab button.close{
+    width:18px;height:18px;
+    border:none;background:transparent;
+    color:var(--faint);
+    border-radius:4px;
+    cursor:pointer;
+  }
+  .tab button.close:hover{background:var(--hover);color:var(--text);}
+  .icon-btn{
+    width:32px;height:32px;
+    border:none;background:transparent;
+    border-radius:var(--radius);
+    color:var(--muted);
+    cursor:pointer;
+    font:inherit;
+  }
+  .icon-btn:hover{background:var(--hover);color:var(--text);}
+  .rule{height:1px;background:var(--border);margin:0;}
+  .head{
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  .title{
+    margin:0;
+    font-size:15px;
+    font-weight:600;
+  }
+  .title-edit{
+    font:600 15px inherit;
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:4px 8px;
+    color:var(--text);
+  }
+  .grow{flex:1;}
+  .check{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    color:var(--text);
+    font-size:13px;
+    user-select:none;
+  }
+  .check input{accent-color:var(--accent);}
+  select, textarea, input[type="text"]{
+    font:inherit;
+    color:var(--text);
+    background:var(--bg);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:6px 8px;
+  }
+  select{min-width:180px;}
+  .thread{
+    flex:1;
+    overflow:auto;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    padding:4px;
+  }
+  .user{
+    align-self:flex-end;
+    max-width:320px;
+    margin:0 0 0 14px;
+    padding:8px 10px;
+    border-radius:var(--radius);
+    background:var(--active-bg);
+    color:var(--text);
+    white-space:pre-wrap;
+  }
+  .assistant{
+    white-space:pre-wrap;
+    line-height:1.45;
+  }
+  .note{cursor:pointer;}
+  .note .summary{
+    color:var(--muted);
+    white-space:pre-wrap;
+    line-height:1.4;
+  }
+  .note .body{
+    display:none;
+    margin:6px 0 0 12px;
+    color:var(--text);
+    white-space:pre-wrap;
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12px;
+  }
+  .note.open .body{display:block;}
+  .composer{
+    display:flex;
+    gap:8px;
+    align-items:flex-end;
+    padding:6px 8px 6px 10px;
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    background:var(--bg);
+  }
+  .composer textarea{
+    flex:1;
+    resize:none;
+    min-height:36px;
+    max-height:140px;
+    border:none;
+    background:transparent;
+    padding:6px 0;
+    outline:none;
+  }
+  .send{
+    border:none;
+    background:var(--accent);
+    color:#fff;
+    font:600 13px inherit;
+    padding:8px 14px;
+    border-radius:var(--radius);
+    cursor:pointer;
+    min-width:120px;
+  }
+  .send:hover{background:var(--accent-hover);}
+  .rail{
+    width:220px;
+    flex:0 0 220px;
+    border-left:1px solid var(--border);
+    background:var(--sidebar-bg);
+    padding:16px 14px 14px;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+  }
+  .rail h2{
+    margin:0;
+    font-size:13px;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    color:var(--faint);
+  }
+  .rail p{margin:0;color:var(--muted);font-size:13px;}
+  .mcp{
+    list-style:none;
+    margin:0;
+    padding:0;
+    flex:1;
+  }
+  .mcp li{
+    padding:8px 8px;
+    border-radius:var(--radius);
+    cursor:pointer;
+  }
+  .mcp li:hover{background:var(--hover);}
+  .copy{
+    border:1px solid var(--border);
+    background:var(--surface);
+    color:var(--text);
+    border-radius:var(--radius);
+    padding:8px 10px;
+    font:600 12px inherit;
+    cursor:pointer;
+  }
+  .copy:hover{background:var(--hover);}
+  .toast{
+    position:fixed;
+    right:16px;
+    bottom:16px;
+    background:var(--text);
+    color:#fff;
+    padding:8px 12px;
+    border-radius:var(--radius);
+    font-size:13px;
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .2s ease;
+  }
+  .toast.show{opacity:1;}
+</style>
+</head>
+<body>
+  <section class="chat">
+    <div class="tabs" id="tabs"></div>
+    <div class="rule"></div>
+    <div class="head">
+      <h1 class="title" id="title">работа</h1>
+      <input class="title-edit" id="title-edit" hidden>
+      <button class="icon-btn" id="rename" type="button" title="Переименовать чат">✎</button>
+      <span class="grow"></span>
+      <label class="check"><input type="checkbox" id="auto" checked> Авто</label>
+      <select id="model">
+        <option>claude-sonnet</option>
+        <option>gpt-4.1</option>
+        <option>локальная</option>
+      </select>
+    </div>
+    <div class="rule"></div>
+    <div class="thread" id="thread"></div>
+    <form class="composer" id="composer">
+      <textarea id="draft" rows="1" placeholder="Сообщение для всех подключений"></textarea>
+      <button class="send" type="submit">Отправить</button>
+    </form>
+  </section>
+  <aside class="rail">
+    <h2>MCP</h2>
+    <p>Подняты в других терминалах</p>
+    <ul class="mcp" id="mcp"></ul>
+    <button class="copy" id="copy" type="button">скопировать для mcp.json</button>
+  </aside>
+  <div class="toast" id="toast"></div>
+<script>
+const targets = [
+  { name: "k8s-edge", url: "http://127.0.0.1:47321/k8s-edge" },
+  { name: "db", url: "http://127.0.0.1:47322/db" }
+];
+
+const tabs = [
+  {
+    title: "работа",
+    messages: [
+      { kind: "user", text: "посмотри свободное место на k8s-edge" },
+      { kind: "assistant", text: "Смотрю диск на k8s-edge." },
+      {
+        kind: "note",
+        status: "выполнено",
+        mcp: "k8s-edge",
+        command: "df -h /",
+        output: "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        40G   18G   20G  48% /"
+      }
+    ]
+  },
+  {
+    title: "черновик",
+    messages: [
+      { kind: "assistant", text: "Этот чат пустой. Напишите, что проверить на серверах." }
+    ]
+  }
+];
+let current = 0;
+
+const thread = document.getElementById("thread");
+const title = document.getElementById("title");
+const titleEdit = document.getElementById("title-edit");
+
+function renderTabs() {
+  const host = document.getElementById("tabs");
+  host.innerHTML = "";
+  tabs.forEach((tab, index) => {
+    const wrap = document.createElement("div");
+    wrap.className = "tab" + (index === current ? " active" : "");
+    const name = document.createElement("button");
+    name.type = "button";
+    name.className = "name";
+    name.textContent = tab.title;
+    name.addEventListener("click", () => { current = index; render(); });
+    wrap.append(name);
+    if (tabs.length > 1) {
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "close";
+      close.textContent = "×";
+      close.addEventListener("click", () => {
+        tabs.splice(index, 1);
+        if (current >= tabs.length) current = tabs.length - 1;
+        render();
+      });
+      wrap.append(close);
+    }
+    host.append(wrap);
+  });
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "icon-btn";
+  add.textContent = "+";
+  add.title = "Новая вкладка";
+  add.addEventListener("click", () => {
+    tabs.push({ title: "чат " + (tabs.length + 1), messages: [] });
+    current = tabs.length - 1;
+    render();
+  });
+  host.append(add);
+}
+
+function noteNode(item) {
+  const block = document.createElement("div");
+  block.className = "note";
+  const summary = document.createElement("div");
+  summary.className = "summary";
+  const mark = () => (block.classList.contains("open") ? "v" : ">");
+  const paint = () => {
+    summary.textContent = item.status + ": " + item.mcp + "\n" + mark() + " " + item.command;
+  };
+  paint();
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = item.command + "\n\n" + item.output;
+  block.append(summary, body);
+  block.addEventListener("click", () => {
+    block.classList.toggle("open");
+    paint();
+  });
+  return block;
+}
+
+function renderThread() {
+  thread.innerHTML = "";
+  tabs[current].messages.forEach((item) => {
+    if (item.kind === "note") {
+      thread.append(noteNode(item));
+      return;
+    }
+    const bubble = document.createElement("div");
+    bubble.className = item.kind;
+    bubble.textContent = item.text;
+    thread.append(bubble);
+  });
+  thread.scrollTop = thread.scrollHeight;
+}
+
+function render() {
+  renderTabs();
+  title.textContent = tabs[current].title;
+  title.hidden = false;
+  titleEdit.hidden = true;
+  renderThread();
+}
+
+document.getElementById("rename").addEventListener("click", () => {
+  title.hidden = true;
+  titleEdit.hidden = false;
+  titleEdit.value = tabs[current].title;
+  titleEdit.focus();
+  titleEdit.select();
+});
+function commitTitle() {
+  const next = titleEdit.value.trim();
+  if (next) tabs[current].title = next;
+  render();
+}
+titleEdit.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") commitTitle();
+  if (event.key === "Escape") render();
+});
+titleEdit.addEventListener("blur", commitTitle);
+
+document.getElementById("composer").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const draft = document.getElementById("draft");
+  const text = draft.value.trim();
+  if (!text) return;
+  tabs[current].messages.push({ kind: "user", text });
+  tabs[current].messages.push({
+    kind: "assistant",
+    text: "Принято. Могу выполнить это на " + targets.map((item) => item.name).join(" или ") + "."
+  });
+  draft.value = "";
+  renderThread();
+});
+
+const mcp = document.getElementById("mcp");
+targets.forEach((item) => {
+  const li = document.createElement("li");
+  li.textContent = item.name;
+  li.title = "Вставить имя в сообщение";
+  li.addEventListener("click", () => {
+    const draft = document.getElementById("draft");
+    draft.value = (draft.value ? draft.value + " " : "") + item.name;
+    draft.focus();
+  });
+  mcp.append(li);
+});
+
+document.getElementById("copy").addEventListener("click", async () => {
+  const json = JSON.stringify({
+    mcpServers: Object.fromEntries(targets.map((item) => [item.name, { url: item.url }]))
+  }, null, 2);
+  try { await navigator.clipboard.writeText(json); } catch (error) {}
+  const toast = document.getElementById("toast");
+  toast.textContent = "Фрагмент mcp.json скопирован";
+  toast.classList.add("show");
+  setTimeout(() => toast.classList.remove("show"), 1400);
+});
+
+render();
+</script>
+</body>
+</html>

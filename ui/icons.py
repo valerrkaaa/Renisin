@@ -5,16 +5,16 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 
-def _pixmap(draw) -> QIcon:
+def _pixmap(draw, color: str = "#e4e4e7") -> QIcon:
     size = 32
     image = QPixmap(size, size)
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor("#e4e4e7"))
+    pen = QPen(QColor(color))
     pen.setWidthF(1.8)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -61,14 +61,16 @@ def gear_icon() -> QIcon:
     """Шестерёнка настроек."""
 
     def draw(painter: QPainter) -> None:
-        painter.drawEllipse(11, 11, 10, 10)
-        painter.drawEllipse(14, 14, 4, 4)
+        painter.save()
+        painter.translate(16, 16)
         for angle in range(0, 360, 45):
             painter.save()
-            painter.translate(16, 16)
             painter.rotate(angle)
-            painter.drawLine(0, -9, 0, -13)
+            painter.drawRoundedRect(-2, -14, 4, 5, 1, 1)
             painter.restore()
+        painter.drawEllipse(-8, -8, 16, 16)
+        painter.drawEllipse(-3, -3, 6, 6)
+        painter.restore()
 
     return _pixmap(draw)
 
@@ -81,6 +83,86 @@ def plus_icon() -> QIcon:
         painter.drawLine(8, 16, 24, 16)
 
     return _pixmap(draw)
+
+
+def terminal_icon() -> QIcon:
+    """Терминал: строка подключения, не папка."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawRoundedRect(7, 8, 18, 16, 2, 2)
+        painter.drawLine(11, 14, 14, 17)
+        painter.drawLine(14, 17, 11, 20)
+        painter.drawLine(16, 20, 21, 20)
+
+    return _pixmap(draw)
+
+
+def chevron_icon() -> QIcon:
+    """Узкая стрелка вправо. Раскрытый узел поворачивает её в коде строки."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawLine(12, 7, 21, 16)
+        painter.drawLine(21, 16, 12, 25)
+
+    return _pixmap(draw, "#8b8d97")
+
+
+def tree_folder_icon() -> QIcon:
+    """Папка в списке иерархии."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawLine(8, 13, 14, 13)
+        painter.drawLine(14, 13, 16, 10)
+        painter.drawLine(16, 10, 24, 10)
+        painter.drawRoundedRect(8, 13, 16, 11, 2, 2)
+
+    return _pixmap(draw, "#8b8d97")
+
+
+def connection_node_icon() -> QIcon:
+    """Подключение: колба с контактами сверху."""
+
+    def draw(painter: QPainter) -> None:
+        scale = 32 / 24
+        painter.drawLine(9 * scale, 2 * scale, 9 * scale, 7 * scale)
+        painter.drawLine(15 * scale, 2 * scale, 15 * scale, 7 * scale)
+        path = QPainterPath()
+        path.moveTo(6.5 * scale, 7 * scale)
+        path.lineTo(17.5 * scale, 7 * scale)
+        path.lineTo(17.5 * scale, 9.5 * scale)
+        path.arcTo(6.5 * scale, 4 * scale, 11 * scale, 11 * scale, 0, -180)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawLine(12 * scale, 15 * scale, 12 * scale, 22 * scale)
+
+    return _pixmap(draw, "#8b8d97")
+
+
+def chat_icon() -> QIcon:
+    """Чат внутри подключения."""
+
+    def draw(painter: QPainter) -> None:
+        painter.drawEllipse(5, 5, 20, 16)
+        painter.drawLine(9, 20, 7, 26)
+        painter.drawLine(7, 26, 14, 20)
+
+    return _pixmap(draw, "#8b8d97")
+
+
+def sparkles_icon() -> QIcon:
+    """Общий чат."""
+
+    def draw(painter: QPainter) -> None:
+        def star(cx: float, cy: float, rx: float, ry: float) -> None:
+            painter.drawLine(cx, cy - ry, cx + rx, cy)
+            painter.drawLine(cx + rx, cy, cx, cy + ry)
+            painter.drawLine(cx, cy + ry, cx - rx, cy)
+            painter.drawLine(cx - rx, cy, cx, cy - ry)
+
+        star(14, 13, 6, 8)
+        star(23, 22, 3, 4)
+
+    return _pixmap(draw, "#8b8d97")
 
 
 def folder_icon() -> QIcon:

@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Общий чат</title>
+<style>
+  :root{
+    --bg:#1f1f1f;
+    --bg-elev:#1b1b1e;
+    --sidebar-bg:#181818;
+    --surface:#262626;
+    --surface-2:#2a2a30;
+    --activity:#101113;
+    --text:#e4e4e7;
+    --text-dim:#b9bbc4;
+    --muted:#8b8d97;
+    --faint:#6b6d78;
+    --border:#2e2f36;
+    --border-strong:#3a3b44;
+    --hover:#222328;
+    --active-bg:#1f2440;
+    --accent:#2f318f;
+    --accent-hover:#5d5ea8;
+    --accent-ring:rgba(93,94,168,0.35);
+    --radius:8px;
+    --radius-sm:6px;
+    --shadow:0 1px 2px rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.18);
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;color-scheme:dark;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-size:14px;
+    color:var(--text);
+    background:var(--bg);
+    display:flex;
+    height:100vh;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::-webkit-scrollbar{width:10px;height:10px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:#33343c;border-radius:8px;border:2px solid var(--bg);}
+  ::-webkit-scrollbar-thumb:hover{background:#40424b;}
+
+  .chat{
+    flex:1;
+    min-width:0;
+    display:flex;
+    flex-direction:column;
+  }
+
+  /* ---------- Tabs: минимальные текстовые с подчёркиванием ---------- */
+  .tabs{
+    display:flex;
+    align-items:stretch;
+    gap:2px;
+    padding:0 12px;
+    min-height:46px;
+    border-bottom:1px solid var(--border);
+    overflow-x:auto;
+    scrollbar-width:none;
+  }
+  .tabs::-webkit-scrollbar{display:none;}
+  .tab{
+    position:relative;
+    display:flex;
+    align-items:center;
+    flex-shrink:0;
+    padding:0 4px 0 12px;
+    gap:2px;
+    cursor:pointer;
+    transition:color .15s ease;
+  }
+  .tab::after{
+    content:"";
+    position:absolute;
+    left:8px;
+    right:8px;
+    bottom:0;
+    height:2px;
+    border-radius:2px 2px 0 0;
+    background:transparent;
+    transition:background .15s ease;
+  }
+  .tab:hover::after{background:var(--border-strong);}
+  .tab.active::after{background:var(--accent-hover);}
+  .tab button.name{
+    border:none;
+    background:transparent;
+    color:var(--muted);
+    font:inherit;
+    font-size:13px;
+    padding:12px 4px;
+    cursor:pointer;
+    white-space:nowrap;
+    transition:color .15s ease;
+  }
+  .tab:hover button.name{color:var(--text-dim);}
+  .tab.active button.name{color:var(--text);font-weight:600;}
+
+  .tab button.close{
+    width:18px;height:18px;
+    border:none;background:transparent;
+    color:var(--faint);
+    border-radius:4px;
+    cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    font-size:14px;line-height:1;
+    padding:0;
+    opacity:0;
+    transition:opacity .15s ease, background .15s ease, color .15s ease;
+  }
+  .tab:hover button.close,
+  .tab.active button.close{opacity:1;}
+  .tab button.close:hover{background:rgba(255,255,255,0.08);color:var(--text);}
+
+  .tab-add{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:32px;
+    border:none;
+    background:transparent;
+    color:var(--faint);
+    font-size:18px;
+    border-radius:var(--radius-sm);
+    cursor:pointer;
+    margin:auto 0;
+    align-self:center;
+    height:28px;
+    transition:background .15s ease, color .15s ease;
+  }
+  .tab-add:hover{background:var(--hover);color:var(--text);}
+
+  /* ---------- Head ---------- */
+  .head{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    padding:14px 18px;
+    min-height:58px;
+    border-bottom:1px solid var(--border);
+  }
+  .title{
+    margin:0;
+    font-size:16px;
+    font-weight:600;
+    letter-spacing:-0.01em;
+  }
+  .title-edit{
+    font:600 16px inherit;
+    border:1px solid rgba(93,94,168,0.6);
+    border-radius:var(--radius);
+    padding:5px 10px;
+    color:var(--text);
+    background:var(--surface);
+    outline:none;
+    box-shadow:0 0 0 3px var(--accent-ring);
+  }
+  .grow{flex:1;}
+
+  .icon-btn{
+    width:30px;height:30px;
+    border:none;background:transparent;
+    border-radius:var(--radius-sm);
+    color:var(--muted);
+    cursor:pointer;
+    font:inherit;
+    font-size:14px;
+    display:flex;align-items:center;justify-content:center;
+    transition:background .15s ease, color .15s ease;
+  }
+  .icon-btn:hover{background:var(--hover);color:var(--text);}
+
+  .toggle{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    cursor:pointer;
+    font-size:13px;
+    color:var(--text-dim);
+    padding:6px 10px;
+    border-radius:var(--radius);
+    user-select:none;
+    transition:background .15s ease;
+  }
+  .toggle:hover{background:var(--hover);}
+  .toggle input{position:absolute;opacity:0;pointer-events:none;}
+  .toggle-track{
+    position:relative;
+    width:32px;height:18px;
+    border-radius:999px;
+    background:var(--border-strong);
+    transition:background .2s ease;
+    flex-shrink:0;
+  }
+  .toggle-thumb{
+    position:absolute;
+    top:2px;left:2px;
+    width:14px;height:14px;
+    border-radius:50%;
+    background:var(--muted);
+    transition:transform .2s ease, background .2s ease;
+  }
+  .toggle input:checked + .toggle-track{background:var(--accent);}
+  .toggle input:checked + .toggle-track .toggle-thumb{
+    transform:translateX(14px);
+    background:#fff;
+  }
+
+  select{
+    font:inherit;
+    font-size:13px;
+    color:var(--text-dim);
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:7px 10px;
+    cursor:pointer;
+    min-width:160px;
+    transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  select:hover{border-color:var(--border-strong);}
+  select:focus{
+    outline:none;
+    border-color:rgba(93,94,168,0.6);
+    box-shadow:0 0 0 3px var(--accent-ring);
+  }
+
+  /* ---------- Thread ---------- */
+  .thread{
+    flex:1;
+    overflow-y:auto;
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+    padding:22px 24px;
+  }
+  .empty{
+    margin:auto;
+    color:var(--faint);
+    font-size:13px;
+    text-align:center;
+    line-height:1.6;
+  }
+  .user{
+    align-self:flex-end;
+    max-width:min(560px, 78%);
+    margin:0 0 0 14px;
+    padding:10px 14px;
+    border-radius:14px 14px 4px 14px;
+    background:linear-gradient(135deg, var(--accent) 0%, #3a3cab 100%);
+    color:#fff;
+    white-space:pre-wrap;
+    line-height:1.45;
+    box-shadow:0 1px 2px rgba(0,0,0,0.25);
+    animation:fadeUp .2s ease both;
+  }
+  .assistant{
+    align-self:flex-start;
+    max-width:min(660px, 85%);
+    padding:10px 14px;
+    border-radius:14px 14px 14px 4px;
+    background:var(--surface);
+    border:1px solid var(--border);
+    white-space:pre-wrap;
+    line-height:1.5;
+    color:var(--text-dim);
+    animation:fadeUp .2s ease both;
+  }
+  @keyframes fadeUp{
+    from{opacity:0;transform:translateY(4px);}
+    to{opacity:1;transform:translateY(0);}
+  }
+
+  /* ---------- Note: стрелка слева, без статуса ---------- */
+  .note{
+    align-self:flex-start;
+    width:min(660px, 85%);
+    border:1px solid var(--border);
+    background:var(--bg-elev);
+    border-radius:var(--radius);
+    cursor:pointer;
+    overflow:hidden;
+    transition:border-color .15s ease;
+    animation:fadeUp .2s ease both;
+  }
+  .note:hover{border-color:var(--border-strong);}
+
+  .note-row{
+    display:flex;
+    align-items:flex-start;
+    gap:10px;
+    padding:10px 12px;
+  }
+  .chevron{
+    flex-shrink:0;
+    width:14px;
+    height:14px;
+    margin-top:3px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:var(--faint);
+    font-size:11px;
+    line-height:1;
+    transition:transform .2s ease, color .15s ease;
+    transform-origin:50% 50%;
+  }
+  .note:hover .chevron{color:var(--text-dim);}
+  .note.open .chevron{transform:rotate(90deg);}
+
+  .note-main{
+    flex:1;
+    min-width:0;
+    display:flex;
+    flex-direction:column;
+    gap:3px;
+  }
+  .note-mcp{
+    font-size:11.5px;
+    color:var(--faint);
+    letter-spacing:.02em;
+  }
+  .note-command{
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12.5px;
+    color:var(--text-dim);
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .note .body{
+    display:none;
+    margin:0;
+    padding:10px 12px 12px 36px;
+    border-top:1px solid var(--border);
+    background:#131316;
+    color:var(--text-dim);
+    white-space:pre-wrap;
+    font-family:Consolas,"Cascadia Mono",monospace;
+    font-size:12px;
+    line-height:1.55;
+    max-height:320px;
+    overflow:auto;
+  }
+  .note.open .body{display:block;}
+
+  /* ---------- Composer ---------- */
+  .composer{
+    display:flex;
+    gap:10px;
+    align-items:flex-end;
+    margin:0 16px 16px;
+    padding:8px 8px 8px 14px;
+    border:1px solid var(--border);
+    border-radius:12px;
+    background:var(--surface);
+    transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  .composer:focus-within{
+    border-color:rgba(93,94,168,0.6);
+    box-shadow:0 0 0 3px var(--accent-ring);
+  }
+  .composer textarea{
+    flex:1;
+    resize:none;
+    min-height:24px;
+    max-height:160px;
+    border:none;
+    background:transparent;
+    padding:8px 0;
+    outline:none;
+    color:var(--text);
+    font:inherit;
+    line-height:1.45;
+  }
+  .composer textarea::placeholder{color:var(--faint);}
+  .send{
+    border:none;
+    background:var(--accent);
+    color:#fff;
+    font:600 13px inherit;
+    padding:9px 18px;
+    border-radius:var(--radius);
+    cursor:pointer;
+    transition:background .15s ease, transform .1s ease;
+  }
+  .send:hover{background:var(--accent-hover);}
+  .send:active{transform:scale(0.98);}
+
+  /* ---------- Rail ---------- */
+  .rail{
+    width:240px;
+    flex:0 0 240px;
+    border-left:1px solid var(--border);
+    background:var(--sidebar-bg);
+    padding:20px 16px 16px;
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+  }
+  .rail h2{
+    margin:0;
+    font-size:11px;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:var(--faint);
+    font-weight:700;
+  }
+  .rail p{margin:0;color:var(--muted);font-size:12px;line-height:1.5;}
+  .mcp{
+    list-style:none;
+    margin:0;
+    padding:0;
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+  }
+  .mcp li{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:8px 10px;
+    border-radius:var(--radius);
+    cursor:pointer;
+    color:var(--text-dim);
+    font-size:13px;
+    transition:background .15s ease, color .15s ease;
+  }
+  .mcp li:hover{background:var(--hover);color:var(--text);}
+  .mcp li::before{
+    content:"";
+    width:6px;height:6px;
+    border-radius:50%;
+    background:var(--muted);
+    flex-shrink:0;
+  }
+  .copy{
+    border:1px solid var(--border);
+    background:var(--surface);
+    color:var(--text-dim);
+    border-radius:var(--radius);
+    padding:10px 12px;
+    font:600 12px inherit;
+    cursor:pointer;
+    transition:background .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .copy:hover{
+    background:var(--hover);
+    color:var(--text);
+    border-color:var(--border-strong);
+  }
+
+  .toast{
+    position:fixed;
+    right:20px;
+    bottom:20px;
+    background:var(--surface);
+    border:1px solid var(--border-strong);
+    color:var(--text);
+    padding:10px 16px;
+    border-radius:var(--radius);
+    font-size:13px;
+    box-shadow:var(--shadow);
+    opacity:0;
+    transform:translateY(8px);
+    pointer-events:none;
+    transition:opacity .2s ease, transform .2s ease;
+  }
+  .toast.show{opacity:1;transform:translateY(0);}
+</style>
+</head>
+<body>
+  <section class="chat">
+    <div class="tabs" id="tabs"></div>
+
+    <div class="head">
+      <h1 class="title" id="title">работа</h1>
+      <input class="title-edit" id="title-edit" hidden>
+      <button class="icon-btn" id="rename" type="button" title="Переименовать чат">✎</button>
+      <span class="grow"></span>
+      <label class="toggle">
+        <input type="checkbox" id="auto" checked>
+        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        <span>Авто</span>
+      </label>
+      <select id="model">
+        <option>claude-sonnet</option>
+        <option>gpt-4.1</option>
+        <option>локальная</option>
+      </select>
+    </div>
+
+    <div class="thread" id="thread"></div>
+
+    <form class="composer" id="composer">
+      <textarea id="draft" rows="1" placeholder="Сообщение для всех подключений"></textarea>
+      <button class="send" type="submit">Отправить</button>
+    </form>
+  </section>
+
+  <aside class="rail">
+    <h2>MCP</h2>
+    <p>Подняты в других терминалах</p>
+    <ul class="mcp" id="mcp"></ul>
+    <button class="copy" id="copy" type="button">скопировать для mcp.json</button>
+  </aside>
+  <div class="toast" id="toast"></div>
+<script>
+const targets = [
+  { name: "k8s-edge", url: "http://127.0.0.1:47321/k8s-edge" },
+  { name: "db", url: "http://127.0.0.1:47322/db" }
+];
+
+const tabs = [
+  {
+    title: "работа",
+    messages: [
+      { kind: "user", text: "посмотри свободное место на k8s-edge" },
+      { kind: "assistant", text: "Смотрю диск на k8s-edge." },
+      {
+        kind: "note",
+        status: "выполнено",
+        mcp: "k8s-edge",
+        command: "df -h /",
+        output: "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        40G   18G   20G  48% /"
+      }
+    ]
+  },
+  {
+    title: "черновик",
+    messages: [
+      { kind: "assistant", text: "Этот чат пустой. Напишите, что проверить на серверах." }
+    ]
+  }
+];
+let current = 0;
+
+const thread = document.getElementById("thread");
+const title = document.getElementById("title");
+const titleEdit = document.getElementById("title-edit");
+
+function renderTabs() {
+  const host = document.getElementById("tabs");
+  host.innerHTML = "";
+  tabs.forEach((tab, index) => {
+    const wrap = document.createElement("div");
+    wrap.className = "tab" + (index === current ? " active" : "");
+
+    const name = document.createElement("button");
+    name.type = "button";
+    name.className = "name";
+    name.textContent = tab.title;
+    name.addEventListener("click", () => { current = index; render(); });
+    wrap.append(name);
+
+    if (tabs.length > 1) {
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "close";
+      close.textContent = "×";
+      close.title = "Закрыть";
+      close.addEventListener("click", (event) => {
+        event.stopPropagation();
+        tabs.splice(index, 1);
+        if (current >= tabs.length) current = tabs.length - 1;
+        render();
+      });
+      wrap.append(close);
+    }
+    host.append(wrap);
+  });
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "tab-add";
+  add.textContent = "+";
+  add.title = "Новая вкладка";
+  add.addEventListener("click", () => {
+    tabs.push({ title: "чат " + (tabs.length + 1), messages: [] });
+    current = tabs.length - 1;
+    render();
+  });
+  host.append(add);
+}
+
+function noteNode(item) {
+  const block = document.createElement("div");
+  block.className = "note";
+
+  const row = document.createElement("div");
+  row.className = "note-row";
+
+  const chevron = document.createElement("span");
+  chevron.className = "chevron";
+  chevron.textContent = "▶";
+
+  const main = document.createElement("div");
+  main.className = "note-main";
+
+  const mcpName = document.createElement("div");
+  mcpName.className = "note-mcp";
+  mcpName.textContent = item.mcp;
+
+  const cmd = document.createElement("div");
+  cmd.className = "note-command";
+  cmd.textContent = item.command;
+
+  main.append(mcpName, cmd);
+
+  row.append(chevron, main);
+
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = item.output;
+
+  block.append(row, body);
+  block.addEventListener("click", () => block.classList.toggle("open"));
+  return block;
+}
+
+function renderThread() {
+  thread.innerHTML = "";
+  const messages = tabs[current].messages;
+
+  if (!messages.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Начните диалог — напишите сообщение ниже";
+    thread.append(empty);
+    return;
+  }
+
+  messages.forEach((item) => {
+    if (item.kind === "note") {
+      thread.append(noteNode(item));
+      return;
+    }
+    const bubble = document.createElement("div");
+    bubble.className = item.kind;
+    bubble.textContent = item.text;
+    thread.append(bubble);
+  });
+  thread.scrollTop = thread.scrollHeight;
+}
+
+function render() {
+  renderTabs();
+  title.textContent = tabs[current].title;
+  title.hidden = false;
+  titleEdit.hidden = true;
+  renderThread();
+}
+
+document.getElementById("rename").addEventListener("click", () => {
+  title.hidden = true;
+  titleEdit.hidden = false;
+  titleEdit.value = tabs[current].title;
+  titleEdit.focus();
+  titleEdit.select();
+});
+function commitTitle() {
+  const next = titleEdit.value.trim();
+  if (next) tabs[current].title = next;
+  render();
+}
+titleEdit.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") commitTitle();
+  if (event.key === "Escape") render();
+});
+titleEdit.addEventListener("blur", commitTitle);
+
+document.getElementById("composer").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const draft = document.getElementById("draft");
+  const text = draft.value.trim();
+  if (!text) return;
+  tabs[current].messages.push({ kind: "user", text });
+  tabs[current].messages.push({
+    kind: "assistant",
+    text: "Принято. Могу выполнить это на " + targets.map((item) => item.name).join(" или ") + "."
+  });
+  draft.value = "";
+  renderThread();
+});
+
+const mcp = document.getElementById("mcp");
+targets.forEach((item) => {
+  const li = document.createElement("li");
+  li.textContent = item.name;
+  li.title = "Вставить имя в сообщение";
+  li.addEventListener("click", () => {
+    const draft = document.getElementById("draft");
+    draft.value = (draft.value ? draft.value + " " : "") + item.name;
+    draft.focus();
+  });
+  mcp.append(li);
+});
+
+document.getElementById("copy").addEventListener("click", async () => {
+  const json = JSON.stringify({
+    mcpServers: Object.fromEntries(targets.map((item) => [item.name, { url: item.url }]))
+  }, null, 2);
+  try { await navigator.clipboard.writeText(json); } catch (error) {}
+  const toast = document.getElementById("toast");
+  toast.textContent = "Фрагмент mcp.json скопирован";
+  toast.classList.add("show");
+  setTimeout(() => toast.classList.remove("show"), 1400);
+});
+
+render();
+</script>
+</body>
+</html>

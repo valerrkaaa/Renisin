@@ -15,12 +15,23 @@ import os
 import threading
 
 from PySide6.QtCore import QEvent, QMimeData, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QCursor, QDrag, QFontMetrics, QTextCharFormat
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QDrag,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPen,
+    QTextCharFormat,
+    QTransform,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -66,18 +77,23 @@ from ui.dialogs import (
 from ui.general_chat import GENERAL_CHAT_ID, GENERAL_CHAT_TITLE, GeneralChatPage
 from ui.edit_dialog import FileEditDialog
 from ui.icons import (
+    chat_icon,
+    chevron_icon,
     close_icon,
+    connection_node_icon,
     folder_icon,
-    sidebar_icon,
     gear_icon,
     paste_icon,
     paste_run_icon,
     plus_icon,
+    sidebar_icon,
+    sparkles_icon,
+    tree_folder_icon,
 )
 from ui.session_settings import SessionSettingsDialog
 from ui.rules_dialog import PatternDialog
 from ui.settings_dialog import SettingsDialog
-from ui.styles import STYLESHEET, TextFormats, build_text_formats
+from ui.styles import BORDER, SELECTION, STYLESHEET, TextFormats, build_text_formats
 from ui.hostkey import QtHostKeyVerifier
 
 
@@ -98,6 +114,26 @@ def _connection_kind(provider: domain.ProviderType) -> str:
     if provider == domain.ProviderType.CMD:
         return "local"
     return "ssh"
+
+
+def _mark_name(kind: str) -> str:
+    if kind == "group":
+        return "folderMark"
+    if kind == "connection":
+        return "connectionMark"
+    if kind == "lounge":
+        return "loungeMark"
+    return "sessionMark"
+
+
+def _row_icon(kind: str):
+    if kind == "group":
+        return tree_folder_icon()
+    if kind == "connection":
+        return connection_node_icon()
+    if kind == "lounge":
+        return sparkles_icon()
+    return chat_icon()
 
 
 def _session_label_name(tone: str, muted: bool) -> str:
@@ -177,12 +213,12 @@ class _SessionTree(QTreeWidget):
         if item is None:
             return "", self._root_layout_index(self.topLevelItemCount())
         kind = item.data(0, _KIND_ROLE)
-        if kind == "lounge":
+        if kind in ("lounge", "rule"):
             return None
         rect = self.visualItemRect(item)
         offset = pos.y() - rect.top()
         height = max(1, rect.height())
-        if kind == "group" and height * 0.25 < offset < height * 0.75:
+        if kind in ("group", "connection") and height * 0.25 < offset < height * 0.75:
             if self._contains(item, node_id):
                 return None
             return str(item.data(0, Qt.ItemDataRole.UserRole) or ""), item.childCount()
@@ -204,7 +240,7 @@ class _SessionTree(QTreeWidget):
         last = min(row, self.topLevelItemCount())
         for index in range(last):
             item = self.topLevelItem(index)
-            if item.data(0, Qt.ItemDataRole.UserRole) != GENERAL_CHAT_ID:
+            if item.data(0, _KIND_ROLE) not in ("lounge", "rule"):
                 count += 1
         return count
 
@@ -218,12 +254,14 @@ class _SessionTree(QTreeWidget):
 
 
 class _SessionRow(QWidget):
-    """Строка дерева. Удаление сессии видно только при наведении."""
+    """Строка дерева. Удаление только в меню правой кнопки."""
 
     delete_clicked = Signal(str)
     open_requested = Signal(str)
+    open_first_requested = Signal(str)
     toggle_requested = Signal(str)
     group_action = Signal(str, str)
+    add_requested = Signal(str)
 
     def __init__(
         self,
@@ -240,78 +278,89 @@ class _SessionRow(QWidget):
         super().__init__()
         self._session_id = session_id
         self._kind = kind
+        self._deletable = deletable
+        self._depth = depth
+        self._has_children = False
         self._press = None
+        self._single_sid = ""
+        self._suppress_release = False
+        self._single_timer = QTimer(self)
+        self._single_timer.setSingleShot(True)
+        self._single_timer.timeout.connect(self._fire_single_click)
         self._full = text
         self.setObjectName("sessionRow")
+        self.setProperty("kind", kind)
         self.setProperty("active", "true" if active else "false")
         self.setProperty("hover", "false")
+        self.setFixedHeight(34)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8 + depth * 12, 6, 8, 6)
+        layout.setContentsMargins(6 + depth * 19 + 4, 1, 12, 1)
         layout.setSpacing(6)
+        self._fold = QPushButton()
+        self._fold.setObjectName("sessionFold")
+        self._fold.setFixedSize(18, 18)
+        self._fold.setIconSize(QSize(14, 14))
+        self._fold.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._fold.setEnabled(False)
+        if kind in ("group", "connection"):
+            tip_fold = (
+                "Свернуть или развернуть подключение"
+                if kind == "connection"
+                else "Свернуть или развернуть группу"
+            )
+            self._fold.setToolTip(tip_fold)
+            self._fold.clicked.connect(lambda: self.toggle_requested.emit(session_id))
+        layout.addWidget(self._fold)
+        self._mark = QLabel()
+        self._mark.setObjectName(_mark_name(kind))
+        self._mark.setPixmap(_row_icon(kind).pixmap(18, 18))
+        self._mark.setFixedSize(18, 18)
+        layout.addWidget(self._mark)
         self._label = QLabel(text)
-        self._label.setObjectName(_session_label_name(tone, muted))
+        if kind == "lounge":
+            self._label.setObjectName("pinnedLabel")
+        else:
+            self._label.setObjectName(_session_label_name(tone, muted))
         if tip:
             self.setToolTip(tip)
             self._label.setToolTip(tip)
-        if active:
-            font = self._label.font()
-            font.setBold(True)
-            self._label.setFont(font)
         self._label.setMinimumWidth(0)
         self._label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._delete = QPushButton("×")
-        self._delete.setObjectName("sessionDelete")
-        self._delete.setFixedSize(18, 18)
-        self._delete.setToolTip("Удалить")
-        self._delete.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._delete.clicked.connect(lambda: self.delete_clicked.emit(session_id))
-        self._delete.setVisible(False)
-        self._delete.setMaximumWidth(0)
-        self._deletable = deletable
-        self._fold = None
-        if kind == "group":
-            self._fold = QPushButton("▸")
-            self._fold.setObjectName("sessionFold")
-            self._fold.setFixedSize(22, 22)
-            self._fold.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._fold.setToolTip("Свернуть или развернуть группу")
-            self._fold.clicked.connect(lambda: self.toggle_requested.emit(session_id))
-            layout.addWidget(self._fold)
         layout.addWidget(self._label, 1)
+        self._add = None
+        self._add_effect = None
+        if kind in ("group", "connection"):
+            self._add = QPushButton()
+            self._add.setObjectName("sessionAdd")
+            self._add.setIcon(plus_icon())
+            self._add.setIconSize(QSize(14, 14))
+            self._add.setFixedSize(22, 22)
+            self._add.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._add.setEnabled(False)
+            self._add_effect = QGraphicsOpacityEffect(self._add)
+            self._add_effect.setOpacity(0)
+            self._add.setGraphicsEffect(self._add_effect)
+            if kind == "connection":
+                self._add.setToolTip("Новый чат в этом подключении")
+                self._add.clicked.connect(lambda: self.add_requested.emit(session_id))
+            else:
+                self._add.setToolTip("Добавить подключение в папку")
+                self._add.clicked.connect(
+                    lambda: self.group_action.emit("add-connection", session_id)
+                )
+            layout.addWidget(self._add)
 
     def enterEvent(self, event) -> None:  # type: ignore[override]
-        self._set_delete_visible(True)
         self._set_hover(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
-        # Переход на кнопку-ребёнка тоже шлёт leave. Прячем кнопку,
-        # только когда курсор действительно вышел из строки.
         if not self.rect().contains(self.mapFromGlobal(QCursor.pos())):
-            self._set_delete_visible(False)
             self._set_hover(False)
         super().leaveEvent(event)
-
-    def _set_delete_visible(self, visible: bool) -> None:
-        layout = self.layout()
-        if layout is None or not self._deletable:
-            return
-        if visible:
-            self._delete.setMaximumWidth(16777215)
-            if layout.indexOf(self._delete) < 0:
-                layout.addWidget(self._delete)
-            self._delete.show()
-        else:
-            layout.removeWidget(self._delete)
-            self._delete.hide()
-            self._delete.setMaximumWidth(0)
-        layout.invalidate()
-        layout.activate()
-        self._label.setText(self._full)
-        self._elide()
-        QTimer.singleShot(0, self._elide)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         self._press = event.position().toPoint()
@@ -334,14 +383,83 @@ class _SessionRow(QWidget):
             return
         super().mouseMoveEvent(event)
 
-    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
-        super().mouseDoubleClickEvent(event)
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        start = self._press
+        self._press = None
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton or start is None:
+            return
+        if self._suppress_release:
+            self._suppress_release = False
+            return
+        point = event.position().toPoint()
+        if self._over_button(point):
+            return
+        if (point - start).manhattanLength() >= QApplication.startDragDistance():
+            return
         kind = self._kind
         sid = self._session_id
-        signal = self.toggle_requested if kind == "group" else self.open_requested
-        # Список пересобирается в ответ на сигнал и удаляет эту строку.
-        # Откладываем, чтобы не звать метод уже уничтоженного виджета.
+        if kind == "connection":
+            if not self._has_children:
+                return
+            self._single_sid = sid
+            self._single_timer.start(QApplication.doubleClickInterval())
+            return
+        if kind == "group":
+            if not self._has_children:
+                return
+            signal = self.toggle_requested
+        elif kind in ("session", "lounge"):
+            signal = self.open_requested
+        else:
+            return
+        # Список может пересобраться в ответ на сигнал и удалить эту строку.
         QTimer.singleShot(0, lambda: signal.emit(sid))
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        self._single_timer.stop()
+        self._single_sid = ""
+        self._suppress_release = True
+        point = event.position().toPoint()
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._kind == "connection"
+            and not self._over_button(point)
+        ):
+            self.open_first_requested.emit(self._session_id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _fire_single_click(self) -> None:
+        sid = self._single_sid
+        self._single_sid = ""
+        if sid and self._kind == "connection" and self._has_children:
+            self.toggle_requested.emit(sid)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        guide = QPen(QColor(BORDER))
+        guide.setWidth(1)
+        painter.setPen(guide)
+        for level in range(1, self._depth + 1):
+            x = level * 19
+            painter.drawLine(x, 0, x, self.height())
+        if self.property("active") == "true":
+            fill = QColor(SELECTION)
+        elif self.property("hover") == "true":
+            fill = QColor("#222328")
+        else:
+            fill = None
+        if fill is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            left = 6 + self._depth * 19
+            rect = self.rect().adjusted(left, 1, -6, -1)
+            painter.drawRoundedRect(rect, 6, 6)
+        painter.end()
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
         if self._kind == "lounge":
@@ -349,16 +467,31 @@ class _SessionRow(QWidget):
             return
         sid = self._session_id
         menu = QMenu()
-        if self._kind == "group":
-            menu.addAction("Переименовать", lambda: self.group_action.emit("rename", sid))
-            menu.addAction("Создать подгруппу", lambda: self.group_action.emit("subgroup", sid))
-            menu.addAction("Удалить группу", lambda: self.group_action.emit("delete", sid))
-        else:
-            menu.addAction(
-                "Переименовать",
-                lambda: self.group_action.emit("rename-session", sid),
-            )
+        for title, callback in self._menu_entries():
+            menu.addAction(title, callback)
         menu.exec(event.globalPos())
+
+    def _menu_entries(self) -> list:
+        sid = self._session_id
+        if self._kind == "group":
+            return [
+                ("Переименовать", lambda: self.group_action.emit("rename", sid)),
+                ("Создать подгруппу", lambda: self.group_action.emit("subgroup", sid)),
+                ("Удалить", lambda: self.group_action.emit("delete", sid)),
+            ]
+        if self._kind == "connection":
+            return [
+                ("Параметры", lambda: self.group_action.emit("connection-settings", sid)),
+                ("Новая сессия", lambda: self.add_requested.emit(sid)),
+                ("Переименовать", lambda: self.group_action.emit("rename-connection", sid)),
+                ("Удалить", lambda: self.group_action.emit("delete-connection", sid)),
+            ]
+        entries = [
+            ("Переименовать", lambda: self.group_action.emit("rename-session", sid)),
+        ]
+        if self._deletable:
+            entries.append(("Удалить", lambda: self.delete_clicked.emit(sid)))
+        return entries
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -368,6 +501,11 @@ class _SessionRow(QWidget):
         self.setProperty("hover", "true" if hover else "false")
         self.style().unpolish(self)
         self.style().polish(self)
+        self.update()
+        if self._add is None or self._add_effect is None:
+            return
+        self._add_effect.setOpacity(1 if hover else 0)
+        self._add.setEnabled(hover)
 
     def _elide(self) -> None:
         try:
@@ -381,13 +519,32 @@ class _SessionRow(QWidget):
             self._label.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, width)
         )
 
-    def set_expanded(self, expanded: bool) -> None:
-        if self._fold is None:
+    def set_has_children(self, has_children: bool) -> None:
+        self._has_children = has_children
+        if not has_children:
+            self._fold.setIcon(QIcon())
+            self._fold.setEnabled(False)
             return
-        self._fold.setText("▾" if expanded else "▸")
+        self._fold.setEnabled(True)
+        self.set_expanded(False)
+
+    def set_expanded(self, expanded: bool) -> None:
+        if not self._has_children:
+            return
+        icon = chevron_icon()
+        if expanded:
+            pixmap = icon.pixmap(14, 14)
+            icon = QIcon(
+                pixmap.transformed(
+                    QTransform().rotate(90),
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self._fold.setIcon(icon)
+        self._fold.setEnabled(True)
 
     def _over_button(self, pos) -> bool:
-        if self._delete.geometry().contains(pos):
+        if self._add is not None and self._add.geometry().contains(pos):
             return True
         return self._fold is not None and self._fold.geometry().contains(pos)
 
@@ -484,7 +641,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Renisin")
         self.resize(1180, 760)
         self.setMinimumSize(860, 520)
-        self._sidebar_width = 200
+        self._sidebar_width = 210
         self._chat_panel_open = True
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -495,11 +652,21 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_pages())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([200, 980])
+        splitter.setSizes([210, 970])
         self.setCentralWidget(splitter)
 
         self.setStyleSheet(STYLESHEET)
         self._sync_panel_toggles()
+
+    def _header_action(self, icon, tip: str) -> QPushButton:
+        button = QPushButton()
+        button.setObjectName("headerAction")
+        button.setIcon(icon)
+        button.setIconSize(QSize(16, 16))
+        button.setFixedSize(24, 24)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(tip)
+        return button
 
     def _icon_button(self, icon, tip: str) -> QPushButton:
         button = QPushButton()
@@ -522,26 +689,27 @@ class MainWindow(QMainWindow):
         panel.setObjectName("sideBar")
         panel.setMinimumWidth(100)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 6, 8)
-        layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 16)
+        layout.setSpacing(0)
 
         head = QHBoxLayout()
+        head.setContentsMargins(16, 16, 10, 8)
         head.setSpacing(2)
-        title = QLabel("СЕССИИ")
+        title = QLabel("ЧАТЫ")
         title.setObjectName("sidebarTitle")
         head.addWidget(title, 1)
 
-        self.new_button = self._icon_button(plus_icon(), "Новая сессия")
-        self.new_button.clicked.connect(self._on_create_session)
-        head.addWidget(self.new_button)
-
-        self.group_button = self._icon_button(
+        self.group_button = self._header_action(
             folder_icon(), "Создать группу в корне списка"
         )
         self.group_button.clicked.connect(self._on_create_group)
         head.addWidget(self.group_button)
 
-        self.settings_button = self._icon_button(
+        self.new_button = self._header_action(plus_icon(), "Новая сессия")
+        self.new_button.clicked.connect(lambda: self._on_create_session())
+        head.addWidget(self.new_button)
+
+        self.settings_button = self._header_action(
             gear_icon(),
             "Настройки\nМодели, правила команд, адрес MCP, мастер-пароль и ключ SSH.",
         )
@@ -725,6 +893,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(input_panel)
 
         self.chat_pane = ChatPane(self._formats.mono)
+        self.chat_pane.set_width_floor(self._chat_column_floor())
         self.chat_pane.setVisible(False)
         self.chat_pane.send_requested.connect(self._on_chat_send)
         self.chat_pane.stop_requested.connect(self._on_chat_stop)
@@ -770,12 +939,20 @@ class MainWindow(QMainWindow):
         tree.blockSignals(True)
         tree.clear()
         self._add_general_chat_row()
+        self._add_tree_divider()
         sessions = {info.session_id: info for info in self._service.list_sessions()}
+        listed = getattr(self._service, "list_connections", None)
+        connections = {
+            item.connection_id: item
+            for item in (listed() if callable(listed) else ())
+        }
         placed: set = set()
-        self._fill_branch(None, "", self._read_layout(), sessions, placed, 0)
+        self._fill_branch(None, "", self._read_layout(), sessions, connections, placed, 0)
         for info in self._service.list_sessions():
-            if info.session_id not in placed:
-                self._add_session_item(None, info)
+            if info.session_id in placed:
+                continue
+            parent = self._find_tree_item(info.connection_id) if info.connection_id else None
+            self._add_session_item(parent, info, 1 if parent is not None else 0)
         tree.blockSignals(False)
         self._update_session_buttons()
         if self._active_session_id == GENERAL_CHAT_ID:
@@ -797,6 +974,7 @@ class MainWindow(QMainWindow):
         parent_id: str,
         layout: domain.ConnectionLayout,
         sessions: dict,
+        connections: dict,
         placed: set,
         depth: int,
     ) -> None:
@@ -804,9 +982,26 @@ class MainWindow(QMainWindow):
             group = layout.group(child_id)
             if group is not None:
                 item = self._add_group_item(parent, group, depth)
-                self._fill_branch(item, group.group_id, layout, sessions, placed, depth + 1)
+                self._fill_branch(
+                    item, group.group_id, layout, sessions, connections, placed, depth + 1
+                )
                 item.setExpanded(group.expanded)
-                self._sync_fold_icon(item, group.expanded)
+                self._arm_fold(item, group.expanded)
+                continue
+            connection = connections.get(child_id)
+            if connection is not None:
+                item = self._add_connection_item(parent, connection, depth)
+                self._fill_branch(
+                    item,
+                    connection.connection_id,
+                    layout,
+                    sessions,
+                    connections,
+                    placed,
+                    depth + 1,
+                )
+                item.setExpanded(connection.expanded)
+                self._arm_fold(item, connection.expanded)
                 continue
             info = sessions.get(child_id)
             if info is None:
@@ -844,6 +1039,25 @@ class MainWindow(QMainWindow):
             depth=depth,
         )
 
+    def _add_connection_item(
+        self,
+        parent: Optional[QTreeWidgetItem],
+        info: domain.ConnectionInfo,
+        depth: int,
+    ) -> QTreeWidgetItem:
+        kind = _connection_kind(info.provider)
+        return self._add_tree_row(
+            parent,
+            info.connection_id,
+            "connection",
+            info.name,
+            active=False,
+            muted=False,
+            deletable=True,
+            depth=depth,
+            tip=f"Подключение {kind}. Плюс открывает новую сессию.",
+        )
+
     def _add_session_item(
         self,
         parent: Optional[QTreeWidgetItem],
@@ -860,8 +1074,7 @@ class MainWindow(QMainWindow):
             tone = "running"
         else:
             tone = "ready"
-        mark = "" if tone == "closed" else "● "
-        text = mark + info.name
+        text = info.name
         return self._add_tree_row(
             parent,
             info.session_id,
@@ -909,10 +1122,12 @@ class MainWindow(QMainWindow):
             tone=tone,
             tip=tip,
         )
-        row.delete_clicked.connect(self._on_delete_session)
+        row.delete_clicked.connect(self._on_delete_row)
         row.open_requested.connect(self._open_session_from_row)
+        row.open_first_requested.connect(self._on_open_first_session)
         row.toggle_requested.connect(self._on_toggle_group)
         row.group_action.connect(self._on_group_action)
+        row.add_requested.connect(self._on_add_session)
         self.session_list.setItemWidget(item, 0, row)
         item.setSizeHint(0, QSize(0, max(24, row.sizeHint().height())))
         return item
@@ -938,8 +1153,20 @@ class MainWindow(QMainWindow):
         if action == "subgroup":
             self._ask_new_group(group_id, "Подгруппа")
             return
+        if action == "add-connection":
+            self._on_create_session(group_id)
+            return
         if action == "rename-session":
             self._rename_session_from_list(group_id)
+            return
+        if action == "rename-connection":
+            self._rename_connection_from_list(group_id)
+            return
+        if action == "connection-settings":
+            self._edit_connection(group_id)
+            return
+        if action == "delete-connection":
+            self._on_delete_connection(group_id)
             return
         if action == "rename":
             name, ok = QInputDialog.getText(self, "Переименовать группу", "Имя группы")
@@ -984,6 +1211,19 @@ class MainWindow(QMainWindow):
         if self._active_session_id == session_id:
             self._update_header()
 
+    def _on_open_first_session(self, connection_id: str) -> None:
+        item = self._find_tree_item(connection_id)
+        if item is None:
+            return
+        for index in range(item.childCount()):
+            child = item.child(index)
+            if child.data(0, _KIND_ROLE) != "session":
+                continue
+            if not item.isExpanded():
+                item.setExpanded(True)
+            self._on_open_session_item(child)
+            return
+
     def _on_toggle_group(self, group_id: str) -> None:
         item = self._find_tree_item(group_id)
         if item is None:
@@ -998,18 +1238,47 @@ class MainWindow(QMainWindow):
         self._remember_group_expanded(item, False)
         self._sync_fold_icon(item, False)
 
+    def _arm_fold(self, item: QTreeWidgetItem, expanded: bool) -> None:
+        row = self.session_list.itemWidget(item, 0)
+        if not isinstance(row, _SessionRow):
+            return
+        row.set_has_children(item.childCount() > 0)
+        row.set_expanded(expanded)
+
     def _sync_fold_icon(self, item: QTreeWidgetItem, expanded: bool) -> None:
         row = self.session_list.itemWidget(item, 0)
         if isinstance(row, _SessionRow):
             row.set_expanded(expanded)
 
+    def _add_tree_divider(self) -> None:
+        item = QTreeWidgetItem()
+        item.setData(0, _KIND_ROLE, "rule")
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        line = QWidget()
+        layout = QHBoxLayout(line)
+        layout.setContentsMargins(12, 6, 12, 6)
+        rule = QFrame()
+        rule.setObjectName("treeDivider")
+        rule.setFixedHeight(1)
+        layout.addWidget(rule)
+        self.session_list.addTopLevelItem(item)
+        self.session_list.setItemWidget(item, 0, line)
+        item.setSizeHint(0, QSize(0, 13))
+
     def _remember_group_expanded(self, item: QTreeWidgetItem, expanded: bool) -> None:
-        if item.data(0, _KIND_ROLE) != "group":
+        kind = item.data(0, _KIND_ROLE)
+        node_id = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        if kind == "connection":
+            setter = getattr(self._service, "set_connection_expanded", None)
+            if callable(setter):
+                setter(node_id, expanded)
+            return
+        if kind != "group":
             return
         setter = getattr(self._service, "set_connection_group_expanded", None)
         if not callable(setter):
             return
-        setter(str(item.data(0, Qt.ItemDataRole.UserRole) or ""), expanded)
+        setter(node_id, expanded)
 
     def _on_node_moved(self, node_id: str, parent_id: str, index: int) -> None:
         mover = getattr(self._service, "move_connection_node", None)
@@ -1067,13 +1336,47 @@ class MainWindow(QMainWindow):
         self._sync_chat(self._active_session_id)
 
     # --- действия с сессиями ---------------------------------------------
-    def _on_create_session(self) -> None:
+    def _on_create_session(self, parent_id: str = "") -> None:
+        dialog = getattr(self, "_create_dialog", None)
+        if dialog is not None:
+            try:
+                if dialog.isVisible():
+                    dialog.raise_()
+                    dialog.activateWindow()
+                    return
+            except RuntimeError:
+                self._create_dialog = None
         dialog = CreateSessionDialog(self._service, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        dialog._group_parent = parent_id
+        self._create_dialog = dialog
+        dialog.finished.connect(self._on_create_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_create_dialog_finished(self, result: int) -> None:
+        dialog = self.sender()
+        if dialog is self._create_dialog:
+            self._create_dialog = None
+        if not isinstance(dialog, CreateSessionDialog):
+            return
+        if result != QDialog.DialogCode.Accepted:
             return
         info = dialog.created_session()
-        if info is not None:
-            self._activate_session(info.session_id)
+        if info is None:
+            return
+        parent_id = str(getattr(dialog, "_group_parent", "") or "")
+        if parent_id and info.connection_id:
+            mover = getattr(self._service, "move_connection_node", None)
+            expand = getattr(self._service, "set_connection_group_expanded", None)
+            try:
+                if callable(mover):
+                    mover(info.connection_id, parent_id, 10000)
+                if callable(expand):
+                    expand(parent_id, True)
+            except Exception as exc:
+                QMessageBox.warning(self, "Новое подключение", str(exc))
+        self._activate_session(info.session_id)
 
     def _on_open_session_item(self, item: QTreeWidgetItem) -> None:
         session_id = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1188,6 +1491,165 @@ class MainWindow(QMainWindow):
                 break
 
         self._activate_session(next_sid if next_sid is not None else sid)
+
+    def _on_delete_row(self, node_id: str) -> None:
+        getter = getattr(self._service, "get_connection", None)
+        if callable(getter) and getter(node_id) is not None:
+            self._on_delete_connection(node_id)
+            return
+        self._on_delete_session(node_id)
+
+    def _rename_connection_from_list(self, connection_id: str) -> None:
+        getter = getattr(self._service, "get_connection", None)
+        connection = getter(connection_id) if callable(getter) else None
+        current = connection.name if connection is not None else ""
+        name, ok = QInputDialog.getText(
+            self, "Переименовать подключение", "Имя подключения", text=current
+        )
+        if not ok:
+            return
+        rename = getattr(self._service, "rename_connection", None)
+        if not callable(rename):
+            return
+        try:
+            rename(connection_id, name)
+        except Exception as exc:
+            QMessageBox.warning(self, "Переименовать подключение", str(exc))
+            return
+        QTimer.singleShot(0, self._reload_sessions)
+
+    def _edit_connection(self, connection_id: str) -> None:
+        getter = getattr(self._service, "get_connection", None)
+        connection = getter(connection_id) if callable(getter) else None
+        if connection is None:
+            return
+        view = domain.SessionInfo(
+            session_id="",
+            name=connection.name,
+            provider=connection.provider,
+            identity=connection.identity,
+            status=domain.SessionStatus.CLOSED,
+            ssh=connection.ssh,
+            mcp_alias=connection.mcp_alias,
+            mcp_description=connection.mcp_description,
+            os_name=connection.os_name,
+            ip_addresses=connection.ip_addresses,
+            username=connection.username,
+            shell_family=connection.shell_family,
+            connection_id=connection.connection_id,
+        )
+        dialog = SessionSettingsDialog(view, "", self)
+        dialog.setWindowTitle("Параметры подключения")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self._service.rename_connection(connection_id, dialog.session_name())
+            sessions = [
+                info
+                for info in self._service.list_sessions()
+                if info.connection_id == connection_id
+            ]
+            if sessions:
+                self._service.update_session_settings(
+                    sessions[0].session_id,
+                    sessions[0].name,
+                    dialog.mcp_alias(),
+                    dialog.mcp_description(),
+                    dialog.os_name(),
+                    dialog.username(),
+                    dialog.ip_addresses(),
+                    dialog.shell_family(),
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось сохранить подключение", str(exc))
+            return
+        self._reload_sessions()
+
+    def _on_add_session(self, connection_id: str) -> None:
+        getter = getattr(self._service, "get_connection", None)
+        connection = getter(connection_id) if callable(getter) else None
+        if connection is None:
+            return
+        ready = getattr(self._service, "opens_with_master_passphrase", None)
+        view = domain.SessionInfo(
+            session_id="",
+            name=connection.name,
+            provider=connection.provider,
+            identity=connection.identity,
+            status=domain.SessionStatus.CLOSED,
+            ssh=connection.ssh,
+            connection_id=connection.connection_id,
+        )
+        if callable(ready) and ready(view):
+            has_master = getattr(self._service, "has_master_password", None)
+            if not (callable(has_master) and has_master()):
+                prompted = MasterPasswordDialog(self._service, self)
+                if prompted.exec() != QDialog.DialogCode.Accepted:
+                    return
+        count = len(self._read_layout().children_of(connection_id)) + 1
+        name, ok = QInputDialog.getText(
+            self,
+            "Новая сессия",
+            "Имя сессии",
+            text=f"сессия {count}",
+        )
+        if not ok or not name.strip():
+            return
+        adder = getattr(self._service, "add_session", None)
+        if not callable(adder):
+            return
+        try:
+            info = adder(connection_id, name)
+        except ValueError:
+            journal = ask_journal_password(
+                self._service,
+                connection.provider,
+                connection.ssh,
+                None,
+                (),
+                self,
+            )
+            if not journal:
+                return
+            try:
+                info = adder(connection_id, name, journal)
+            except Exception as exc:
+                QMessageBox.warning(self, "Не удалось открыть сессию", str(exc))
+                return
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось открыть сессию", str(exc))
+            return
+        self._activate_session(info.session_id)
+
+    def _on_delete_connection(self, connection_id: str) -> None:
+        getter = getattr(self._service, "get_connection", None)
+        connection = getter(connection_id) if callable(getter) else None
+        name = connection.name if connection is not None else connection_id
+        answer = QMessageBox.question(
+            self,
+            "Удалить подключение",
+            f"Удалить подключение «{name}» и все его сессии?\n"
+            "Журналы команд будут удалены без возможности восстановления.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        deleter = getattr(self._service, "delete_connection", None)
+        if not callable(deleter):
+            return
+        try:
+            deleter(connection_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось удалить подключение", str(exc))
+            return
+        if self._active_session_id:
+            info = self._service.get_session(self._active_session_id)
+            if info is None:
+                self._active_session_id = None
+                self._activate_session(None)
+                return
+        self._reload_sessions()
 
     def _on_delete_session(self, session_id: Optional[str] = None) -> None:
         sid = session_id or self._active_session_id
@@ -1336,6 +1798,24 @@ class MainWindow(QMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+
+    def _drop_terminal_command(self, session_id: str, command_id: str) -> None:
+        if not command_id:
+            return
+        layout = self._layouts.get(session_id)
+        if layout is not None:
+            for index in range(layout.count() - 1, -1, -1):
+                item = layout.itemAt(index)
+                widget = item.widget() if item is not None else None
+                if (
+                    isinstance(widget, CommandCard)
+                    and getattr(widget, "command_id", None) == command_id
+                ):
+                    layout.removeWidget(widget)
+                    widget.deleteLater()
+        live = self._live_cards.get(session_id)
+        if live is not None and getattr(live, "command_id", None) == command_id:
+            self._live_cards.pop(session_id, None)
 
     def _render_history(self, events: List[domain.TranscriptEvent]) -> None:
         removed = {
@@ -1859,7 +2339,7 @@ class MainWindow(QMainWindow):
             self.chat_pane.set_busy(False)
             self.chat_pane.set_problem("")
         if self._chat_panel_open and opening:
-            self._work_split.setSizes([500, 420])
+            self._match_chat_column()
             if not current:
                 self.chat_pane.popup_unbound_model()
         self._sync_panel_toggles()
@@ -1905,7 +2385,7 @@ class MainWindow(QMainWindow):
         if show:
             sizes = self._shell.sizes()
             total = sum(sizes) or self.width()
-            side = self._sidebar_width or 200
+            side = self._sidebar_width or 210
             self._shell.setSizes([side, max(1, total - side)])
         self._sync_panel_toggles()
 
@@ -1954,6 +2434,23 @@ class MainWindow(QMainWindow):
         has_chat = info is not None
         self._chat_toggle.setEnabled(has_chat)
         self._chat_toggle.setChecked(has_chat and self.chat_pane.isVisible())
+
+    def _screen_width(self) -> int:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return max(1, self.width())
+        return max(1, screen.availableGeometry().width())
+
+    def _chat_column_floor(self) -> int:
+        """Чат нельзя сжать уже, чем четверть ширины экрана."""
+        return max(160, int(self._screen_width() * 0.25))
+
+    def _match_chat_column(self) -> None:
+        """Колонка чата с моделью той же ширины, что и колонка терминала."""
+        sizes = self._work_split.sizes()
+        total = sum(sizes) or self._work_split.width() or 1
+        half = total // 2
+        self._work_split.setSizes([half, total - half])
 
     def _set_split_gap(self, chat_open: bool) -> None:
         """Поля команды и промпта отступают от общей границы панелей."""
@@ -2527,6 +3024,7 @@ class MainWindow(QMainWindow):
             return
 
         if et == domain.EventType.COMMAND_REMOVED:
+            self._drop_terminal_command(sid, event.command_id or "")
             return
 
         if et == domain.EventType.COMMAND_SENT:
@@ -2917,6 +3415,9 @@ class MainWindow(QMainWindow):
             return
         if action in ("run", "always"):
             self._hidden_terminal.add(prompt.session_id)
+            tab = lounge_tab_id(prompt.origin_id)
+            if tab:
+                self._lounge_runs[prompt.session_id] = tab
         else:
             self._hidden_terminal.discard(prompt.session_id)
         self.chat_pane.clear_command_request()
@@ -2959,6 +3460,13 @@ class MainWindow(QMainWindow):
             return False
         if self._owned_by_model(event):
             return True
+        blocked = getattr(self._service, "mcp_blocks_terminal", None)
+        if callable(blocked):
+            try:
+                if blocked(event.session_id):
+                    return True
+            except Exception:
+                pass
         if event.session_id not in self._hidden_terminal:
             return False
         return not event.command_id
@@ -3099,6 +3607,9 @@ class MainWindow(QMainWindow):
             return ""
         if info is None:
             return ""
+        label = getattr(self._service, "mcp_label", None)
+        if callable(label):
+            return label(info)
         return (getattr(info, "mcp_alias", "") or "").strip() or getattr(info, "name", "")
 
     def _finish_lounge_card(self, tab_id: str, return_code: Optional[int]) -> None:
