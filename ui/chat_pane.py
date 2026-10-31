@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from application.terminal_mcp import parse_call
 from ui.command_input import five_line_height, one_line_height
 from ui.fitted_text import FittedText, clamp_scroll_host
 
@@ -123,7 +124,7 @@ class _SelectableText(QTextEdit):
                     + parent_layout.contentsMargins().right()
                 )
             available = parent.width() - margins
-            if 30 <= available < width:
+            if available >= 30 and (width < 30 or available < width):
                 width = available
         if width < 30:
             return
@@ -179,6 +180,90 @@ def split_shell_blocks(text: str) -> List[Tuple[str, str]]:
     if not parts:
         parts.append(("text", text))
     return parts
+
+
+class _CallNote(QWidget):
+    """Свёрнутая строка вызова. По нажатию показывает команду и ответ."""
+
+    def __init__(self, status: str, command: str, output: str, mcp: str = "") -> None:
+        super().__init__()
+        self._status = status.strip() or "выполнено"
+        self._command = command
+        self._open = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(6)
+        self._summary = QLabel()
+        self._summary.setObjectName("toolCall")
+        self._summary.setWordWrap(True)
+        self._summary.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._summary.installEventFilter(self)
+        layout.addWidget(self._summary)
+        self._body = QWidget()
+        self._body.setObjectName("toolCallBody")
+        body = QVBoxLayout(self._body)
+        body.setContentsMargins(12, 0, 0, 0)
+        body.setSpacing(4)
+        self._command_view = _SelectableText(command, "commandText", margin=0)
+        body.addWidget(self._command_view)
+        self._answer_view = _SelectableText(output, "commandOutput", margin=0)
+        body.addWidget(self._answer_view)
+        self._mcp = " ".join(mcp.split())
+        self._body.hide()
+        layout.addWidget(self._body)
+        self._show_summary()
+
+    def _show_summary(self) -> None:
+        text = self._line()
+        self._summary.setText(text)
+        lines = text.count("\n") + 1
+        self._summary.setMinimumHeight(self._summary.fontMetrics().lineSpacing() * lines + 4)
+
+    def _line(self) -> str:
+        """Имя MCP на первой строке, стрелка и команда — на следующей."""
+        mark = "v" if self._open else ">"
+        head = f"{self._status}:"
+        if self._mcp:
+            head = f"{head} {self._mcp}"
+        command = " ".join(self._command.split())
+        if command:
+            return f"{head}\n{mark} {command}"
+        return f"{mark} {head}"
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if (
+            obj is self._summary
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._open = not self._open
+            self._body.setVisible(self._open)
+            self._show_summary()
+            if self._open:
+                self._command_view.fit_to_text()
+                self._answer_view.fit_to_text()
+                QTimer.singleShot(0, self._refit_body)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _refit_body(self) -> None:
+        try:
+            self._command_view.fit_to_text()
+            self._answer_view.fit_to_text()
+        except RuntimeError:
+            return
+
+
+def call_note(text: str) -> Optional[QWidget]:
+    data = parse_call(text)
+    if data is None:
+        return None
+    return _CallNote(
+        str(data.get("status") or ""),
+        str(data.get("command") or ""),
+        str(data.get("output") or ""),
+        str(data.get("mcp") or ""),
+    )
 
 
 def parse_edit_block(body: str) -> tuple[str, str, str] | None:
@@ -450,6 +535,7 @@ class _CommandRequest(QFrame):
         self._model_text = ""
         self._exit_code: object = None
         self._editable = False
+        self._settled = False
         self._live = ""
 
         review = QHBoxLayout()
@@ -523,10 +609,11 @@ class _CommandRequest(QFrame):
         self._output.setPlainText("")
         self._review_row.setVisible(False)
         self._editable = False
+        self._settled = False
         self._live = ""
 
     def note_output(self, text: str, replace: bool) -> None:
-        if self._editable:
+        if self._editable or self._settled:
             return
         if replace:
             self._live = text
@@ -538,6 +625,7 @@ class _CommandRequest(QFrame):
         self._output.setTextCursor(cursor)
 
     def show_result(self, output: str, model_text: str, code: object) -> None:
+        self._settled = True
         self._model_text = model_text
         self._exit_code = code
         shown = output if output.strip() else model_text
@@ -1144,8 +1232,10 @@ class ChatPane(QWidget):
     def _append(self, role: str, text: str) -> QWidget:
         shown = text.strip("\n")
         if role == "result":
-            widget = FittedText(shown)
-            widget.setObjectName("toolOutcome")
+            widget = call_note(shown)
+            if widget is None:
+                widget = FittedText(shown)
+                widget.setObjectName("toolOutcome")
             widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
             self._insert_message(widget)
             return widget

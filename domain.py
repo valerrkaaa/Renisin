@@ -182,6 +182,8 @@ class EventType(str, Enum):
     COMMAND_SENT = "command_sent"
     OUTPUT_CHUNK = "output_chunk"
     COMMAND_FINISHED = "command_finished"
+    # Команда убрана из ленты. Её события остаются в журнале, но больше не рисуются.
+    COMMAND_REMOVED = "command_removed"
     ERROR = "error"
     SESSION_STATUS = "session_status"
     CHAT_USER = "chat_user"

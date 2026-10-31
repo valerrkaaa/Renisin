@@ -102,7 +102,9 @@ class TerminalView(QWidget):
             if columns != self._screen.columns or rows != self._screen.lines:
                 self._screen.resize(columns, rows)
                 self._cols = columns
+            # Размер PTY с прошлого окна не растягивает виджет: просим текущую высоту.
             if rows != self._preferred_rows or columns != self._announced_cols:
+                self._announced_rows = None
                 self._announce_size()
         if data:
             if not self._dragging:
@@ -453,8 +455,10 @@ class TerminalView(QWidget):
         if first is None:
             self._row_origin = 0
             return 1
+        # Курсор на следующей пустой строке виден. Дальше пустой буфер PTY не рисуем:
+        # иначе короткая команда занимает всю высоту экрана.
         if self._interactive and cursor.y > last:
-            last = cursor.y
+            last = min(cursor.y, last + 1)
         self._row_origin = first
         return max(1, last - first + 1)
 

@@ -58,6 +58,7 @@ class CommandCard(QFrame):
 
         self.setObjectName("commandCard")
         self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -151,6 +152,9 @@ class CommandCard(QFrame):
         )
         self.output.setMinimumWidth(0)
         self.output.setMinimumHeight(0)
+        self.output.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self.output.document().setDocumentMargin(0)
         self.output.setVisible(False)
         self.output.installEventFilter(self)
@@ -254,16 +258,16 @@ class CommandCard(QFrame):
         self._plain = None
         return text
 
-    def end_live(self) -> bool:
-        """Выключить клавиатуру. Экран с текстом остаётся на месте."""
+    def end_live(self) -> str:
+        """Выключить экран и вернуть его текст. Дальше блок выглядит как история."""
         self._live = False
         self.terminal.set_interactive(False)
         self.reject_button.setVisible(False)
         self._reason_row.setVisible(False)
-        if self.terminal.has_content():
-            return True
+        text = self.terminal.plain_text() if self.terminal.has_content() else ""
         self.terminal.setVisible(False)
-        return False
+        self.terminal.setFixedHeight(0)
+        return text.strip("\n")
 
     def finalize(
         self,
@@ -314,17 +318,22 @@ class CommandCard(QFrame):
         self._height_scheduled = False
         self._adjust_height()
 
+    def refit(self) -> None:
+        """Подогнать высоту вывода под текст, без пустого хвоста от буфера PTY."""
+        if self._has_output:
+            self._adjust_height()
+
     def _adjust_height(self) -> None:
         if not self._has_output:
             return
         width = self.output.viewport().width()
         if width < 30:
-            return
+            width = 480
         doc = self.output.document()
         doc.setDocumentMargin(0)
         doc.setTextWidth(width)
         block = doc.lastBlock()
-        if block.text() == "" and block.previous().isValid():
+        while block.text().strip() == "" and block.previous().isValid():
             block = block.previous()
         bottom = doc.documentLayout().blockBoundingRect(block).bottom()
         chrome = max(0, self.output.height() - self.output.viewport().height())

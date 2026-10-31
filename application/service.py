@@ -24,6 +24,7 @@ from application.terminal_mcp import (
     INTERACTIVE_REASON,
     CommandAnswer,
     CommandAsk,
+    call_record,
     finished_text,
     lounge_origin,
     lounge_tab_id,
@@ -146,6 +147,7 @@ class ApplicationService:
         self._mcp_endpoint = ""
         self._mcp_server = None
         self._mcp_watch: Dict[domain.SessionId, _McpWatch] = {}
+        self._mcp_hidden: set = set()
         self._chat_stops: Dict[domain.SessionId, domain.ChatStop] = {}
         self._mcp_gate = threading.Lock()
 
@@ -1265,10 +1267,11 @@ class ApplicationService:
                 self._shell_labels.pop(event.session_id, None)
 
             abort_mcp = self._observe_mcp_locked(event)
+            hide_from_terminal = self._mark_mcp_command_locked(event)
             subscribers = list(self._subscribers)
 
             journal_error: Optional[BaseException] = None
-            if event.persist and os_text is None:
+            if event.persist and os_text is None and not hide_from_terminal:
                 try:
                     self._journal.append(transcript)
                 except Exception as exc:
@@ -1876,8 +1879,9 @@ class ApplicationService:
         if self.session_state(session_id) != "ready":
             return refusal_reason("сессия не готова принять команду")
         allow = self._command_allow
+        tab = lounge_tab_id(origin)
         if allow is not None and allow.allows(session_id, text):
-            return self._execute_mcp_command(session_id, text)
+            return self._execute_mcp_command(session_id, text, tab)
         parts = split_shell_commands(text, info.shell_family)
         spans = self._command_spans(text, info.shell_family)
         approver = self._approver
@@ -1903,9 +1907,9 @@ class ApplicationService:
         if action == "always":
             if allow is not None:
                 allow.remember(session_id, text)
-            return self._execute_mcp_command(session_id, text)
+            return self._execute_mcp_command(session_id, text, tab)
         if action == "run":
-            return self._execute_mcp_command(session_id, text)
+            return self._execute_mcp_command(session_id, text, tab)
         if action == "deliver":
             return answer.body.strip() or refusal_reason("пустой вывод")
         return refusal()
@@ -1940,9 +1944,57 @@ class ApplicationService:
                 if self._mcp_watch.get(session_id) is watch:
                     self._mcp_watch.pop(session_id, None)
 
-    def _execute_mcp_command(self, session_id: domain.SessionId, command: str) -> str:
-        model_text, _output, _code = self.capture_mcp_output(session_id, command)
+    def _execute_mcp_command(
+        self,
+        session_id: domain.SessionId,
+        command: str,
+        lounge_tab: str = "",
+    ) -> str:
+        model_text, output, _code = self.capture_mcp_output(session_id, command)
+        status = "отказ" if model_text.strip().startswith("отказ") else "выполнено"
+        body = model_text if status == "отказ" or not output.strip() else output
+        mcp = ""
+        if lounge_tab:
+            info = self.get_session(session_id)
+            if info is not None:
+                mcp = info.mcp_alias.strip() or info.name
+        try:
+            self.record_tool_outcome(
+                session_id,
+                call_record(status, command, body, mcp),
+                lounge_tab,
+            )
+        except Exception:
+            pass
         return model_text
+
+    def hides_terminal_command(self, command_id: str) -> bool:
+        """Команда модели не попадает в ленту терминала."""
+        if not command_id:
+            return False
+        with self._lock:
+            return command_id in self._mcp_hidden
+
+    def _mark_mcp_command_locked(self, event: domain.OutputEvent) -> bool:
+        watch = self._mcp_watch.get(event.session_id)
+        if watch is None:
+            return False
+        if event.event_type not in (
+            domain.EventType.COMMAND_SENT,
+            domain.EventType.OUTPUT_CHUNK,
+            domain.EventType.ERROR,
+            domain.EventType.COMMAND_FINISHED,
+        ):
+            return False
+        if (
+            watch.command_id
+            and event.command_id
+            and event.command_id != watch.command_id
+        ):
+            return False
+        if event.command_id:
+            self._mcp_hidden.add(event.command_id)
+        return True
 
     def _raise_if_chat_stopped(self) -> None:
         stop = domain.current_chat_stop()
@@ -2730,6 +2782,21 @@ class ApplicationService:
             str(arguments.get("intent") or ""),
             command,
             origin_id=origin,
+        )
+
+    def hide_command(self, session_id: domain.SessionId, command_id: str) -> None:
+        """Убрать команду из ленты. Журнал остаётся, при следующем открытии её нет."""
+        if not command_id:
+            return
+        self._handle_driver_event(
+            domain.OutputEvent(
+                session_id=session_id,
+                event_type=domain.EventType.COMMAND_REMOVED,
+                timestamp=datetime.now(),
+                command_id=command_id,
+                stream_type=domain.StreamType.SYSTEM,
+                persist=True,
+            )
         )
 
     def _append_chat(

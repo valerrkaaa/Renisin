@@ -48,6 +48,7 @@ from application.command_rules import fully_allowed
 from application.terminal_mcp import (
     CommandAnswer,
     CommandAsk,
+    call_record,
     finished_text,
     lounge_tab_id,
 )
@@ -55,7 +56,7 @@ from shell_takeover import looks_like_secret_prompt
 from ui.chat_pane import ChatPane
 from ui.command_input import CommandInput, command_needs_more
 from ui.command_card import CommandCard
-from ui.fitted_text import clamp_scroll_host
+from ui.fitted_text import clamp_scroll_host, sync_scroll_extent
 from ui.dialogs import (
     CreateSessionDialog,
     MasterPasswordDialog,
@@ -440,6 +441,7 @@ class MainWindow(QMainWindow):
         self._lounge_runs: Dict[domain.SessionId, str] = {}
         self._mcp_pending: Dict[domain.SessionId, tuple] = {}
         self._reviewing: Dict[str, tuple] = {}
+        self._review_commands: Dict[str, str] = {}
         self._hidden_terminal: Set[domain.SessionId] = set()
         self._panels: Dict[domain.SessionId, QScrollArea] = {}
         self._layouts: Dict[domain.SessionId, QVBoxLayout] = {}
@@ -1336,16 +1338,25 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
 
     def _render_history(self, events: List[domain.TranscriptEvent]) -> None:
+        removed = {
+            ev.command_id
+            for ev in events
+            if ev.event_type == domain.EventType.COMMAND_REMOVED and ev.command_id
+        }
         current_card: Optional[CommandCard] = None
         for ev in events:
+            if ev.command_id and ev.command_id in removed:
+                continue
             if ev.event_type == domain.EventType.COMMAND_SENT:
                 current_card = CommandCard(
                     ev.payload.rstrip("\n"), self._formats.mono
                 )
+                current_card.command_id = ev.command_id
                 self._add_history_widget(current_card)
             elif ev.event_type == domain.EventType.OUTPUT_CHUNK:
                 if current_card is None:
                     current_card = CommandCard("Команда", self._formats.mono)
+                    current_card.command_id = ev.command_id
                     self._add_history_widget(current_card)
                 fmt = (
                     self._formats.stderr
@@ -1356,6 +1367,7 @@ class MainWindow(QMainWindow):
             elif ev.event_type == domain.EventType.ERROR:
                 if current_card is None:
                     current_card = CommandCard("Команда", self._formats.mono)
+                    current_card.command_id = ev.command_id
                     self._add_history_widget(current_card)
                 current_card.append_output(
                     f"[ошибка] {ev.payload}\n", self._formats.error
@@ -1602,20 +1614,54 @@ class MainWindow(QMainWindow):
         card.terminal.use_geometry(
             self._viewport_cols(scroll), self._viewport_rows(scroll)
         )
+        self._fit_card_into_view(card, scroll)
+
+    def _fit_card_into_view(self, card: CommandCard, scroll: QScrollArea) -> None:
+        """Живой экран не выше ленты, нижняя строка less остаётся на экране."""
+        viewport = scroll.viewport().height()
+        layout = card.layout()
+        if layout is not None:
+            layout.activate()
+        if viewport >= 80 and card.terminal.isVisible():
+            extra = max(0, card.height() - card.terminal.height())
+            room = viewport - extra - 8
+            cell = max(1, QFontMetrics(self._formats.mono).height())
+            if room >= cell * 8:
+                rows = max(8, min(60, (room - 4) // cell))
+                card.terminal.set_preferred_rows(rows)
+        sync_scroll_extent(scroll)
 
     def _sync_live_rows(self) -> None:
+        if getattr(self, "_syncing_rows", False):
+            return
         scroll = getattr(self, "history_scroll", None)
         if scroll is None:
             return
-        for card in self._live_cards.values():
-            if card.is_live():
-                self._fit_live_terminal(card, scroll)
+        self._syncing_rows = True
+        try:
+            live = None
+            for card in self._live_cards.values():
+                if card.is_live():
+                    self._fit_live_terminal(card, scroll)
+                    live = card
+            sync_scroll_extent(scroll)
+            if live is not None:
+                self._show_card_top(live, scroll)
+        finally:
+            self._syncing_rows = False
 
     def _show_card_top(self, card: CommandCard, scroll: QScrollArea) -> None:
         def go() -> None:
             try:
+                sync_scroll_extent(scroll)
                 bar = scroll.verticalScrollBar()
-                bar.setValue(max(0, card.y() - 6))
+                viewport = scroll.viewport().height()
+                top = max(0, card.y() - 6)
+                if card.height() <= viewport:
+                    bar.setValue(min(top, bar.maximum()))
+                    return
+                bottom = card.y() + card.height() - viewport + 6
+                bar.setValue(max(0, min(bar.maximum(), bottom)))
             except RuntimeError:
                 return
         QTimer.singleShot(0, go)
@@ -2325,8 +2371,22 @@ class MainWindow(QMainWindow):
     def _on_event_from_driver(self, event: domain.TranscriptEvent) -> None:
         self._event_received.emit(event)
 
+    def _owned_by_model(self, event: domain.TranscriptEvent) -> bool:
+        command_id = event.command_id
+        if not command_id:
+            return False
+        ask = getattr(self._service, "hides_terminal_command", None)
+        if not callable(ask):
+            return False
+        try:
+            return bool(ask(command_id))
+        except Exception:
+            return False
+
     def _mirror_lounge_command(self, event: domain.TranscriptEvent) -> None:
         """Команда из общего чата видна в его ленте и принимает ввод, пока идёт."""
+        if self._owned_by_model(event):
+            return
         tab_id = self._lounge_runs.get(event.session_id)
         if not tab_id:
             return
@@ -2432,15 +2492,15 @@ class MainWindow(QMainWindow):
             if active == sid:
                 self._update_input_state()
             return
-        if sid in self._hidden_terminal and event.event_type in (
-            domain.EventType.COMMAND_SENT,
-            domain.EventType.OUTPUT_CHUNK,
-            domain.EventType.ERROR,
-            domain.EventType.COMMAND_FINISHED,
-        ):
+        if self._model_terminal_event(event):
             self._feed_hidden_command(event)
             if event.event_type == domain.EventType.COMMAND_FINISHED:
                 self._dismissed_commands.discard(sid)
+                reviewing = any(
+                    item[0].session_id == sid for item in self._reviewing.values()
+                )
+                if not reviewing:
+                    self._hidden_terminal.discard(sid)
                 if active == sid:
                     self._update_input_state()
                 self._reload_sessions()
@@ -2466,8 +2526,12 @@ class MainWindow(QMainWindow):
             self._reload_sessions()
             return
 
+        if et == domain.EventType.COMMAND_REMOVED:
+            return
+
         if et == domain.EventType.COMMAND_SENT:
             card = CommandCard(event.payload.rstrip("\n"), self._formats.mono)
+            card.command_id = event.command_id
             card.input_generated.connect(
                 lambda data, s=sid: self._service.write_input(s, data)
             )
@@ -2544,13 +2608,13 @@ class MainWindow(QMainWindow):
             card = self._live_cards.pop(sid, None)
             if card is not None:
                 if card.is_live():
-                    plain = card.take_plain()
-                    kept = card.end_live()
-                    if kept:
-                        if plain:
-                            card.remember_plain(plain)
-                    elif plain:
-                        card.append_output(plain, self._formats.stdout)
+                    plain = card.take_plain() or ""
+                    screen = card.end_live()
+                    shown = plain if plain.strip() else screen
+                    if shown and not shown.endswith("\n"):
+                        shown += "\n"
+                    if shown.strip():
+                        card.append_output(shown, self._formats.stdout)
                 card.finalize(event.return_code, self._formats.exit)
             if active == sid:
                 self._update_input_state()
@@ -2622,6 +2686,7 @@ class MainWindow(QMainWindow):
     def _on_card_remove(self, card: CommandCard) -> None:
         parent = card.parentWidget()
         layout = parent.layout() if parent is not None else None
+        sid = self._session_of_layout(layout) if layout is not None else None
         if layout is not None:
             index = layout.indexOf(card)
             if index >= 0:
@@ -2629,6 +2694,13 @@ class MainWindow(QMainWindow):
             layout.removeWidget(card)
         card.setParent(None)
         card.deleteLater()
+        command_id = getattr(card, "command_id", None)
+        hide = getattr(self._service, "hide_command", None)
+        if sid is not None and command_id and callable(hide):
+            try:
+                hide(sid, command_id)
+            except Exception:
+                pass
         for session_id, live in list(self._live_cards.items()):
             if live is not card:
                 continue
@@ -2828,6 +2900,7 @@ class MainWindow(QMainWindow):
                 break
         if found is None:
             found = self._reviewing.pop(request_id, None)
+            self._review_commands.pop(request_id, None)
         if found is None:
             return
         prompt = found[0]
@@ -2842,13 +2915,14 @@ class MainWindow(QMainWindow):
             self.chat_pane.show_command_running(request_id)
             self._start_command_review(prompt)
             return
-        self._hidden_terminal.discard(prompt.session_id)
+        if action in ("run", "always"):
+            self._hidden_terminal.add(prompt.session_id)
+        else:
+            self._hidden_terminal.discard(prompt.session_id)
         self.chat_pane.clear_command_request()
         self._lounge.clear_command_request()
-        self._record_tool_outcome(prompt, action, reason)
-        tab_id = lounge_tab_id(prompt.origin_id)
-        if tab_id and action in ("run", "always"):
-            self._lounge_runs[prompt.session_id] = tab_id
+        if action not in ("run", "always"):
+            self._record_tool_outcome(prompt, action, reason)
         found[1](CommandAnswer(action, reason))
         if (
             prompt.session_id in self._chat_wait
@@ -2874,6 +2948,21 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _model_terminal_event(self, event: domain.TranscriptEvent) -> bool:
+        """Команда модели не занимает ленту. Команда пользователя остаётся в ней."""
+        if event.event_type not in (
+            domain.EventType.COMMAND_SENT,
+            domain.EventType.OUTPUT_CHUNK,
+            domain.EventType.ERROR,
+            domain.EventType.COMMAND_FINISHED,
+        ):
+            return False
+        if self._owned_by_model(event):
+            return True
+        if event.session_id not in self._hidden_terminal:
+            return False
+        return not event.command_id
+
     def _feed_hidden_command(self, event: domain.TranscriptEvent) -> None:
         request_id = ""
         for item in self._reviewing.values():
@@ -2881,6 +2970,14 @@ class MainWindow(QMainWindow):
                 request_id = item[0].request_id
                 break
         if not request_id:
+            return
+        known = self._review_commands.get(request_id)
+        if event.command_id:
+            if known is None:
+                self._review_commands[request_id] = event.command_id
+            elif event.command_id != known:
+                return
+        elif known is not None:
             return
         if event.event_type == domain.EventType.OUTPUT_CHUNK:
             self.chat_pane.note_command_output(
@@ -2910,6 +3007,7 @@ class MainWindow(QMainWindow):
         if found is None:
             return
         prompt = found[0]
+        self._review_commands.pop(request_id, None)
         self._hidden_terminal.discard(prompt.session_id)
         self.chat_pane.clear_command_request()
         self._lounge.clear_command_request()
@@ -2922,7 +3020,12 @@ class MainWindow(QMainWindow):
             )
         else:
             body = model_text
-        self._record_tool_outcome(prompt, "run", "")
+        status = "отказ" if str(model_text).strip().startswith("отказ") else "выполнено"
+        if status == "отказ":
+            shown = model_text
+        else:
+            shown = text if str(text).strip() else model_text
+        self._record_call_note(prompt, status, shown)
         found[1](CommandAnswer("deliver", body=body))
         if (
             prompt.session_id in self._chat_wait
@@ -2953,6 +3056,17 @@ class MainWindow(QMainWindow):
         if tab:
             self._finish_lounge_card(tab, None)
             self._lounge_runs.pop(session_id, None)
+
+    def _record_call_note(self, prompt: CommandAsk, status: str, output: str) -> None:
+        note = getattr(self._service, "record_tool_outcome", None)
+        if not callable(note):
+            return
+        tab = lounge_tab_id(prompt.origin_id)
+        mcp = self._mcp_label(prompt.session_id) if tab else ""
+        try:
+            note(prompt.session_id, call_record(status, prompt.command, output, mcp), tab)
+        except Exception:
+            return
 
     def _record_tool_outcome(self, prompt: CommandAsk, action: str, reason: str) -> None:
         command = prompt.command.strip()

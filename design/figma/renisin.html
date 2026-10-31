@@ -1,0 +1,285 @@
+<!--
+  Copyright (c) 2026 Valery Andreevich Glushchenko. Dual-licensed under AGPL-3.0 and Commercial License.
+  SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+-->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Одиночный терминал</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: #1f1f1f; }
+    body {
+      width: 1440px;
+      height: 900px;
+      color: #e4e4e7;
+      font: 12px/1.4 "Segoe UI", sans-serif;
+    }
+    button, input { font: inherit; color: inherit; }
+    .screen {
+      display: flex;
+      width: 1440px;
+      height: 900px;
+      background: #1f1f1f;
+      overflow: hidden;
+    }
+    .tree {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      width: 200px;
+      flex: 0 0 200px;
+      padding: 8px 6px 8px 8px;
+      background: #181818;
+    }
+    .tree-head, .term-head, .chat-head, .session, .prompt, .composer, .actions, .card-head {
+      display: flex;
+      align-items: center;
+    }
+    .tree-head { gap: 2px; padding-bottom: 6px; }
+    .eyebrow {
+      flex: 1;
+      margin: 0;
+      color: #8b8d97;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+    .icon-btn {
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #8b8d97;
+      line-height: 22px;
+      text-align: center;
+    }
+    .sessions { display: flex; flex-direction: column; gap: 2px; }
+    .session {
+      gap: 6px;
+      min-height: 28px;
+      padding: 6px 8px;
+      border-radius: 5px;
+      color: #e4e4e7;
+    }
+    .session.nested { padding-left: 20px; }
+    .session.active { background: #1f2440; font-weight: 600; }
+    .session.muted { color: #6b6d78; }
+    .fold { color: #8b8d97; }
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #86efac;
+    }
+    .badge { margin-left: auto; color: #86efac; font-size: 10px; font-weight: 600; }
+    .work {
+      display: flex;
+      flex: 1;
+      gap: 12px;
+      min-width: 0;
+      padding: 10px 14px;
+    }
+    .terminal, .chat {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+      min-height: 0;
+    }
+    .terminal { flex: 1; }
+    .chat { flex: 0 0 420px; gap: 10px; }
+    .term-head, .chat-head { gap: 8px; min-height: 28px; }
+    .status { color: #86efac; font-size: 11px; font-weight: 600; }
+    .session-name, .chat-title { margin: 0; font-size: 13px; font-weight: 600; }
+    .history, .thread {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1;
+      min-height: 0;
+    }
+    .thread { gap: 10px; }
+    .card, .ask {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid #2e2f36;
+      border-radius: 5px;
+      background: #262626;
+    }
+    .card-head { gap: 8px; }
+    .arrow, .cmd, .out, .preview, .capture {
+      font-family: "Cascadia Mono", Consolas, monospace;
+    }
+    .arrow { color: #8b8d97; }
+    .cmd { font-weight: 600; }
+    .rule { height: 1px; background: #2e2f36; }
+    .out {
+      margin: 0;
+      padding-left: 16px;
+      color: #8b8d97;
+      white-space: pre-wrap;
+    }
+    .prompt, .composer {
+      gap: 8px;
+      padding: 6px 8px 6px 10px;
+      border: 1px solid #2e2f36;
+      border-radius: 5px;
+      background: #1f1f1f;
+    }
+    .field {
+      flex: 1;
+      margin: 0;
+      color: #6b6d78;
+      font-family: "Cascadia Mono", Consolas, monospace;
+    }
+    .composer .field { font-family: "Segoe UI", sans-serif; }
+    .send, .aux {
+      border: 0;
+      border-radius: 5px;
+      padding: 6px 10px;
+      font-weight: 600;
+    }
+    .send { background: #2f318f; color: #fff; }
+    .aux { border: 1px solid #2e2f36; background: #262626; color: #e4e4e7; }
+    .model, .usage {
+      border: 1px solid #2e2f36;
+      border-radius: 5px;
+      background: #1f1f1f;
+    }
+    .model { padding: 4px 8px; font-size: 11px; }
+    .usage { padding: 6px 10px; color: #8b8d97; font-size: 11px; }
+    .check { display: flex; align-items: center; gap: 6px; }
+    .box {
+      width: 14px;
+      height: 14px;
+      border: 1px solid #2e2f36;
+      border-radius: 3px;
+      background: #2f318f;
+      color: #fff;
+      font-size: 10px;
+      line-height: 12px;
+      text-align: center;
+    }
+    .user-row { display: flex; justify-content: flex-end; }
+    .user {
+      max-width: 320px;
+      margin: 0;
+      padding: 8px 10px 8px 14px;
+      border-radius: 5px;
+      background: #1f2440;
+    }
+    .note { display: flex; flex-direction: column; gap: 2px; }
+    .note p { margin: 0; color: #8b8d97; }
+    .note .cmd-line { font-family: "Cascadia Mono", Consolas, monospace; }
+    .ask h3, .ask p { margin: 0; }
+    .ask h3 { font-size: 12px; font-weight: 600; }
+    .meta { color: #8b8d97; }
+    .preview, .capture {
+      padding: 6px 8px;
+      border-radius: 5px;
+      background: #101113;
+      color: #e4e4e7;
+    }
+    .capture { color: #8b8d97; font-size: 11px; white-space: pre; }
+    .actions { gap: 8px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <main class="screen" id="single-terminal">
+    <aside class="tree" id="session-tree">
+      <div class="tree-head">
+        <p class="eyebrow">СЕССИИ</p>
+        <button class="icon-btn" type="button">+</button>
+        <button class="icon-btn" type="button">▣</button>
+        <button class="icon-btn" type="button">⚙</button>
+      </div>
+      <div class="sessions" id="hierarchy">
+        <div class="session">общий чат для ИИ</div>
+        <div class="session"><span class="fold">▾</span> кластер</div>
+        <div class="session nested active">
+          <span class="dot"></span>
+          <span>k8s-control-plane</span>
+          <span class="badge">READY</span>
+        </div>
+        <div class="session nested muted">demo</div>
+        <div class="session"><span class="dot"></span> local</div>
+      </div>
+    </aside>
+
+    <div class="work" id="workspace">
+      <section class="terminal" id="terminal">
+        <div class="term-head">
+          <span class="status">READY</span>
+          <h1 class="session-name">k8s-control-plane</h1>
+          <button class="icon-btn" type="button">⚙</button>
+        </div>
+        <div class="history" id="terminal-history">
+          <article class="card">
+            <div class="card-head">
+              <span class="arrow">❯</span>
+              <span class="cmd">hostname</span>
+            </div>
+            <div class="rule"></div>
+            <p class="out">k8s-control-plane</p>
+          </article>
+          <article class="card">
+            <div class="card-head">
+              <span class="arrow">❯</span>
+              <span class="cmd">cat /proc/loadavg &amp;&amp; uptime</span>
+            </div>
+            <div class="rule"></div>
+            <p class="out">0.07 0.03 0.00 1/564 7909
+15:18:15 up 11:52,  4 users,  load average: 0.07, 0.03, 0.00</p>
+          </article>
+        </div>
+        <div class="prompt">
+          <p class="field">команда…</p>
+          <button class="send" type="button">Отправить</button>
+        </div>
+      </section>
+
+      <section class="chat" id="ai-chat">
+        <div class="chat-head">
+          <h2 class="chat-title">Чат</h2>
+          <span class="model">local · qwen</span>
+          <span class="check"><span class="box">✓</span> Авто</span>
+          <span class="check"><span class="box">✓</span> Просмотр</span>
+          <span class="usage">1.2k / 8192</span>
+        </div>
+        <div class="thread" id="chat-thread">
+          <div class="user-row">
+            <p class="user">Покажи аптайм и нагрузку на control-plane</p>
+          </div>
+          <div class="note">
+            <p>выполнено: k8s</p>
+            <p class="cmd-line">&gt; uptime</p>
+          </div>
+          <article class="ask" id="approval">
+            <h3>Запрос на выполнение команды</h3>
+            <p class="meta">MCP: k8s</p>
+            <p>Снять нагрузку процессора</p>
+            <p class="preview">Команда: mpstat 1 2 | tail -n 5</p>
+            <p class="capture">Linux 6.8.0-k8s (k8s-control-plane)
+%usr  %sys  %idle
+ 4.2   1.1  94.0</p>
+            <div class="actions">
+              <button class="send" type="button">Отправить</button>
+              <button class="aux" type="button">Обезличить</button>
+              <button class="aux" type="button">Отклонить по причине</button>
+            </div>
+          </article>
+        </div>
+        <div class="composer">
+          <p class="field">Сообщение модели…</p>
+          <button class="send" type="button">Отправить</button>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

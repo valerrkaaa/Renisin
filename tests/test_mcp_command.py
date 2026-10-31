@@ -511,6 +511,64 @@ class McpCommandTests(unittest.TestCase):
         self.assertEqual(gate.asks[-1].origin_id, origin)
         self.assertEqual(gate.asks[-1].session_id, plain.session_id)
 
+    def test_removed_command_does_not_return(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        from ui.command_card import CommandCard
+        from ui.main_window import MainWindow
+
+        service, _driver, profiles = _world()
+        info = _session(service, profiles)
+        service.send_command(info.session_id, "echo hi")
+        sent = [
+            event
+            for event in service.get_history(info.session_id)
+            if event.event_type == domain.EventType.COMMAND_SENT
+            and event.payload.strip() == "echo hi"
+        ]
+        self.assertTrue(sent)
+        service.hide_command(info.session_id, sent[0].command_id)
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        cards = [
+            card
+            for card in window.findChildren(CommandCard)
+            if card.command.strip() == "echo hi"
+        ]
+        self.assertEqual(cards, [])
+        window.close()
+
+    def test_executed_call_is_a_chat_note_not_a_terminal_event(self) -> None:
+        from application.terminal_mcp import parse_call
+
+        driver = _Driver()
+        service, driver, profiles = _world(driver)
+        info = _session(service, profiles)
+        service.set_command_approver(lambda _prompt: CommandAnswer("run"))
+        result = service.run_mcp_command(
+            info.session_id, "домашняя папка", "dir %USERPROFILE%"
+        )
+        self.assertTrue(result.startswith("выполнено"))
+        self.assertIn("dir %USERPROFILE%", driver.sent)
+        sent = [
+            event.payload.strip()
+            for event in service.get_history(info.session_id)
+            if event.event_type == domain.EventType.COMMAND_SENT
+        ]
+        self.assertNotIn("dir %USERPROFILE%", sent)
+        notes = [
+            event.payload
+            for event in service.get_history(info.session_id)
+            if event.event_type == domain.EventType.CHAT_TOOL
+        ]
+        data = parse_call(notes[-1])
+        assert data is not None
+        self.assertEqual(data["status"], "выполнено")
+        self.assertEqual(data["command"], "dir %USERPROFILE%")
+        self.assertIn("a.txt", data["output"])
+
     def test_interactive_screen_is_cancelled(self) -> None:
         driver = _Driver()
         service, driver, profiles = _world(driver)
@@ -1168,6 +1226,69 @@ class ChatCardTests(unittest.TestCase):
         self.assertEqual(delivered[0][4], 0)
         pane.close()
 
+    def test_terminal_accepts_a_command_while_output_waits(self) -> None:
+        from PySide6.QtWidgets import QApplication, QPlainTextEdit
+
+        from application.terminal_mcp import CommandAsk
+        from ui.command_card import CommandCard
+        from ui.main_window import MainWindow
+
+        service, _driver, profiles = _world()
+        info = _session(service, profiles)
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        prompt = CommandAsk(
+            request_id="id-wait",
+            session_id=info.session_id,
+            intent="список",
+            command="ls",
+            parts=("ls",),
+        )
+        window._mcp_pending[info.session_id] = (prompt, lambda _answer: None)
+        window.chat_pane.show_command_request("id-wait", "список", "ls")
+        QApplication.processEvents()
+        self.assertTrue(window.input.isEnabled())
+
+        window._mcp_pending.pop(info.session_id)
+        window._reviewing["id-wait"] = (prompt, lambda _answer: None)
+        window._hidden_terminal.add(info.session_id)
+        service._mcp_hidden.add("model-1")
+        window.chat_pane.show_command_running("id-wait")
+        window.chat_pane.show_command_result(
+            "id-wait", "from-model\n", "выполнено, код 0\nfrom-model\n", 0
+        )
+        QApplication.processEvents()
+        self.assertTrue(window.input.isEnabled())
+
+        service.send_command(info.session_id, "echo hi")
+        QApplication.processEvents()
+        window._on_event_ui(domain.TranscriptEvent(
+            event_id=domain.new_event_id(),
+            session_id=info.session_id,
+            sequence=0,
+            event_type=domain.EventType.OUTPUT_CHUNK,
+            timestamp=datetime.now(),
+            command_id="model-1",
+            stream_type=domain.StreamType.STDOUT,
+            payload="leaked\n",
+        ))
+        QApplication.processEvents()
+
+        edit = window.chat_pane.findChild(QPlainTextEdit, "commandCapture")
+        assert edit is not None
+        self.assertEqual(edit.toPlainText(), "from-model\n")
+        cards = [
+            card
+            for card in window.findChildren(CommandCard)
+            if card.command.strip() == "echo hi"
+        ]
+        self.assertEqual(len(cards), 1)
+        self.assertIn("a.txt", cards[0].output.toPlainText())
+        self.assertTrue(window.input.isEnabled())
+        window.close()
+
     def test_review_checkbox_sends_the_answer_immediately_when_off(self) -> None:
         from PySide6.QtGui import QFont
         from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
@@ -1296,6 +1417,103 @@ class ChatCardTests(unittest.TestCase):
         self.assertFalse(spans[0][-1].matched)
         self.assertEqual(window._mcp_pending[info.session_id][0].spans, spans)
         window.close()
+
+    def test_auto_run_keeps_the_call_in_the_chat(self) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication, QLabel, QTextEdit
+
+        from application.command_rules import TextSpan
+        from application.terminal_mcp import CommandAsk
+        from ui.command_card import CommandCard
+        from ui.main_window import MainWindow
+
+        service, _driver, profiles = _world()
+        info = _session(service, profiles)
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        answers: list = []
+
+        def finish(answer) -> None:
+            answers.append(answer)
+            if answer.action == "run":
+                service._execute_mcp_command(info.session_id, "dir %USERPROFILE%")
+
+        window._present_mcp((
+            CommandAsk(
+                "auto-hide",
+                info.session_id,
+                "домашняя папка",
+                "dir %USERPROFILE%",
+                parts=("dir %USERPROFILE%",),
+                spans=((TextSpan("dir %USERPROFILE%", True, True),),),
+            ),
+            finish,
+        ))
+        QApplication.processEvents()
+        QApplication.processEvents()
+        self.assertEqual([item.action for item in answers], ["run"])
+        cards = [
+            card
+            for card in window.findChildren(CommandCard)
+            if card.command.strip() == "dir %USERPROFILE%"
+        ]
+        self.assertEqual(cards, [])
+        label = window.chat_pane.findChild(QLabel, "toolCall")
+        assert label is not None
+        self.assertEqual(label.text(), "выполнено:\n> dir %USERPROFILE%")
+        body = label.parent().findChild(QTextEdit, "commandOutput").parent()
+        self.assertTrue(body.isHidden())
+        QTest.mouseClick(label, Qt.MouseButton.LeftButton)
+        QApplication.processEvents()
+        self.assertEqual(label.text(), "выполнено:\nv dir %USERPROFILE%")
+        self.assertFalse(body.isHidden())
+        command = label.parent().findChild(QTextEdit, "commandText")
+        output = label.parent().findChild(QTextEdit, "commandOutput")
+        self.assertEqual(command.toPlainText(), "dir %USERPROFILE%")
+        self.assertIn("a.txt", output.toPlainText())
+        window.close()
+
+    def test_expanded_call_uses_the_chat_scroll(self) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication, QLabel, QTextEdit
+
+        from application.terminal_mcp import call_record
+        from ui.chat_pane import ChatPane
+
+        pane = ChatPane(QFont("Consolas"))
+        pane.resize(420, 320)
+        pane.show()
+        command = "\n".join(f"echo {index}" for index in range(40))
+        output = "\n".join(f"line {index}" for index in range(40))
+        pane.append_message("result", call_record("выполнено", command, output))
+        QApplication.processEvents()
+        label = pane.findChild(QLabel, "toolCall")
+        assert label is not None
+        self.assertTrue(label.text().startswith("выполнено:"))
+        self.assertIn("\n> echo 0", label.text())
+        QTest.mouseClick(label, Qt.MouseButton.LeftButton)
+        QApplication.processEvents()
+        command_view = label.parent().findChild(QTextEdit, "commandText")
+        answer_view = label.parent().findChild(QTextEdit, "commandOutput")
+        assert command_view is not None and answer_view is not None
+        self.assertEqual(
+            command_view.verticalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.assertEqual(
+            answer_view.verticalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.assertEqual(command_view.verticalScrollBar().maximum(), 0)
+        self.assertEqual(answer_view.verticalScrollBar().maximum(), 0)
+        self.assertGreater(command_view.height(), 240)
+        self.assertGreater(answer_view.height(), 240)
+        pane.close()
 
     def test_auto_run_shows_the_block_then_executes_a_full_match(self) -> None:
         from PySide6.QtWidgets import QApplication, QCheckBox, QFrame

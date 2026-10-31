@@ -163,6 +163,12 @@ QWidget#generalChat QLabel#chatUser,
 QWidget#generalChat QLabel#chatAssistant {{
     padding: 2px 4px;
 }}
+QLabel#toolCall {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    padding: 2px 2px;
+}}
 QLabel#toolOutcome, QTextEdit#toolOutcome {{
     background: transparent;
     color: {MUTED};

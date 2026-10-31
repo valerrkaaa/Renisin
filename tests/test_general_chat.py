@@ -17,10 +17,21 @@ import json
 
 import domain
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QTextCharFormat
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QTextEdit
+from PySide6.QtGui import QFont, QTextCharFormat
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLabel,
+    QScrollArea,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
+from application.terminal_mcp import call_record
 from ui.command_card import CommandCard
+from ui.fitted_text import sync_scroll_extent
+from ui.terminal_view import TerminalView
 from ui.general_chat import GENERAL_CHAT_ID, GENERAL_CHAT_TITLE, GeneralChatPage
 from ui.main_window import MainWindow
 
@@ -181,6 +192,18 @@ class GeneralChatTests(unittest.TestCase):
         edits = [edit for edit in page.findChildren(QTextEdit) if edit.objectName() == "chatUser"]
         self.assertEqual(len(edits), 1)
         user = edits[0]
+        self.assertLess(user.height(), 80)
+        self.assertIn("запрос альфа", user.toPlainText())
+        index = page._current
+        page._add_tab()
+        QApplication.processEvents()
+        page._select_tab(index)
+        QApplication.processEvents()
+        edits = [edit for edit in page.findChildren(QTextEdit) if edit.objectName() == "chatUser" and edit.isVisible()]
+        self.assertEqual(len(edits), 1)
+        self.assertLess(edits[0].height(), 80)
+        self.assertIn("запрос альфа", edits[0].toPlainText())
+        user = edits[0]
         self.assertTrue(user.isReadOnly())
         cursor = user.textCursor()
         cursor.setPosition(0)
@@ -218,6 +241,7 @@ class GeneralChatTests(unittest.TestCase):
         self.assertEqual(len(shown), 1)
         self.assertIn("ls", shown[0].command)
         self.assertIn("a.txt", shown[0].output_text())
+        self.assertFalse(shown[0].terminal.isVisible())
         self.assertEqual(shown[0].findChild(QLabel, "commandTarget").text(), "MCP: консоль")
         self.assertIn("консоль", card.record)
         page.close()
@@ -283,3 +307,71 @@ class GeneralChatTests(unittest.TestCase):
         self.assertIn("/mcp/a", dialog._url.text())
         dialog.close()
         window.close()
+
+    def test_short_output_does_not_keep_empty_pty_rows(self) -> None:
+        font = QFont("Cascadia Mono", 10)
+        view = TerminalView(font)
+        view.set_interactive(True)
+        view.resize(640, 400)
+        view.feed("hello\nworld\n")
+        view.feed("\x1b[22;1H")
+        cell = view.fontMetrics().height()
+        self.assertLess(view.height(), cell * 8)
+        view.feed("\x1b[?1049h")
+        view.set_preferred_rows(20)
+        self.assertGreaterEqual(view.height(), cell * 8)
+        view.close()
+
+        card = CommandCard("cat /proc/loadavg", font)
+        card.resize(640, 40)
+        fmt = QTextCharFormat()
+        fmt.setFont(font)
+        card.append_output("0.07 0.03 0.00\n" + ("\n" * 30), fmt)
+        QApplication.processEvents()
+        self.assertLess(card.output.height(), cell * 6)
+        card.close()
+
+    def test_scroll_range_follows_a_taller_terminal(self) -> None:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.resize(240, 120)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        tall = QWidget()
+        tall.setFixedHeight(480)
+        layout.addWidget(tall)
+        layout.addStretch(1)
+        scroll.setWidget(host)
+        scroll.show()
+        QApplication.processEvents()
+        sync_scroll_extent(scroll)
+        QApplication.processEvents()
+        self.assertGreaterEqual(scroll.verticalScrollBar().maximum(), 300)
+        scroll.close()
+
+    def test_user_and_assistant_text_is_visible(self) -> None:
+        page = GeneralChatPage(QFont("Consolas"))
+        page.resize(900, 700)
+        page.show()
+        QApplication.processEvents()
+        page.set_messages(
+            page.current_tab_id(),
+            [
+                ("user", "какой аптайм"),
+                ("assistant", "Сейчас проверю."),
+                ("result", call_record("выполнено", "uptime", "up 11:52", "local")),
+            ],
+        )
+        QApplication.processEvents()
+        user = page.findChild(QTextEdit, "chatUser")
+        assistant = page.findChild(QTextEdit, "chatAssistant")
+        note = page.findChild(QLabel, "toolCall")
+        assert user is not None and assistant is not None and note is not None
+        self.assertGreater(user.viewport().width(), 40)
+        self.assertGreater(assistant.viewport().width(), 40)
+        self.assertLess(user.height(), 80)
+        self.assertLess(assistant.height(), 80)
+        self.assertEqual(user.toPlainText(), "какой аптайм")
+        self.assertEqual(assistant.toPlainText(), "Сейчас проверю.")
+        self.assertEqual(note.text(), "выполнено: local\n> uptime")
+        page.close()

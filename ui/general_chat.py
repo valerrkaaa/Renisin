@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 from uuid import uuid4
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QGuiApplication, QTextCharFormat
+from PySide6.QtGui import QFont, QFontMetrics, QGuiApplication, QTextCharFormat
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -31,9 +31,9 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
-from ui.chat_pane import _CommandRequest, _SelectableText
+from ui.chat_pane import _CommandRequest, _SelectableText, call_note
 from ui.command_card import CommandCard
-from ui.fitted_text import FittedText, clamp_scroll_host
+from ui.fitted_text import FittedText, clamp_scroll_host, sync_scroll_extent
 from ui.command_input import GrowingText
 
 GENERAL_CHAT_ID = "general-ai-chat"
@@ -453,12 +453,13 @@ class GeneralChatPage(QWidget):
         if card is None:
             return ""
         if card.is_live():
-            plain = card.take_plain()
-            kept = card.end_live()
-            if kept and plain:
-                card.remember_plain(plain)
-            elif plain:
-                card.append_output(plain, stdout)
+            plain = card.take_plain() or ""
+            screen = card.end_live()
+            shown = plain if plain.strip() else screen
+            if shown and not shown.endswith("\n"):
+                shown += "\n"
+            if shown.strip():
+                card.append_output(shown, stdout)
         card.finalize(return_code, exit_fmt)
         card.record = _command_record(card)
         if self.current_tab_id() == tab_id:
@@ -482,7 +483,56 @@ class GeneralChatPage(QWidget):
             and event.type() == QEvent.Type.Resize
         ):
             clamp_scroll_host(scroll)
+            self._fit_transcript()
         return super().eventFilter(obj, event)
+
+    def _fit_transcript(self) -> None:
+        """Пузырь равен тексту. Иначе он раздувается, и сообщение уезжает вниз."""
+        if getattr(self, "_fitting_transcript", False):
+            return
+        host = getattr(self, "_transcript_host", None)
+        scroll = getattr(self, "_transcript_scroll", None)
+        if host is None:
+            return
+        self._fitting_transcript = True
+        try:
+            for view in host.findChildren(_SelectableText):
+                view.fit_to_text()
+            for view in host.findChildren(FittedText):
+                view.fit_to_width()
+            for card in host.findChildren(CommandCard):
+                card.refit()
+            if scroll is not None:
+                self._fit_live_geometry(scroll)
+                sync_scroll_extent(scroll)
+        except RuntimeError:
+            return
+        finally:
+            self._fitting_transcript = False
+
+    def _fit_live_geometry(self, scroll: QScrollArea) -> None:
+        """Живой экран в общем чате занимает видимую ленту, а не прошлый размер окна."""
+        height = scroll.viewport().height()
+        if height < 80:
+            return
+        cell = max(1, QFontMetrics(self._mono).height())
+        usable = max(cell * 8, height - cell * 3 - 24)
+        rows = max(8, min(60, usable // cell))
+        width = max(80, scroll.viewport().width() - 56)
+        cols = max(20, min(400, width // max(1, QFontMetrics(self._mono).horizontalAdvance("M"))))
+        tab = self._tabs[self._current]
+        for _index, card in tab.cards:
+            if not card.is_live():
+                continue
+            card.terminal.use_geometry(cols, rows)
+            layout = card.layout()
+            if layout is not None:
+                layout.activate()
+            extra = max(0, card.height() - card.terminal.height())
+            room = height - extra - 8
+            if card.terminal.isVisible() and room >= cell * 8:
+                fitted = max(8, min(60, (room - 4) // cell))
+                card.terminal.set_preferred_rows(fitted)
 
     def _render_messages(self) -> None:
         tab = self._tabs[self._current]
@@ -564,6 +614,8 @@ class GeneralChatPage(QWidget):
             card.rule_requested.connect(self.rule_requested.emit)
             self._request_card = card
             self._transcript.insertWidget(self._transcript.count() - 1, card)
+        self._fit_transcript()
+        QTimer.singleShot(0, self._fit_transcript)
         self._scroll_bottom()
 
     def update_command_preview(
@@ -637,10 +689,14 @@ class GeneralChatPage(QWidget):
 
     def _bubble(self, role: str, text: str) -> QWidget:
         if role == "result":
+            note = call_note(text)
+            if note is not None:
+                return note
             label = FittedText(text)
             label.setObjectName("toolOutcome")
             return label
         row = QWidget()
+        row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         label = _SelectableText(
@@ -650,12 +706,15 @@ class GeneralChatPage(QWidget):
             left_margin=14,
         )
         label.setMaximumWidth(520)
-        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        label.setMinimumWidth(48)
+        # Подсказка ширины у текста нулевая, и растяжка забирала всю строку:
+        # поле оставалось, а буквы не рисовались.
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         if role == "user":
             layout.addStretch(1)
-            layout.addWidget(label)
+            layout.addWidget(label, 1)
         else:
-            layout.addWidget(label)
+            layout.addWidget(label, 1)
             layout.addStretch(1)
         return row
 

@@ -344,6 +344,30 @@ def finished_text(code: Optional[int], output: str) -> str:
     return f"выполнено, код {code_text}"
 
 
+def call_record(status: str, command: str, output: str, mcp: str = "") -> str:
+    """Запись вызова в истории чата. Модели эта строка не отправляется."""
+    payload = {
+        "kind": "call",
+        "status": status,
+        "command": command,
+        "output": output,
+    }
+    label = mcp.strip()
+    if label:
+        payload["mcp"] = label
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def parse_call(text: str) -> Optional[dict]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or data.get("kind") != "call":
+        return None
+    return data
+
+
 def input_schema() -> dict:
     return {
         "type": "object",

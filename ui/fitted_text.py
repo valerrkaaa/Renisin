@@ -103,6 +103,21 @@ def clamp_scroll_host(scroll: QScrollArea) -> None:
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
 
+def sync_scroll_extent(scroll: QScrollArea) -> None:
+    """Полоса прокрутки достаёт до низа содержимого, а не до старой высоты окна."""
+    host = scroll.widget()
+    if host is None:
+        return
+    layout = host.layout()
+    if layout is None:
+        return
+    layout.invalidate()
+    hint = max(layout.sizeHint().height(), scroll.viewport().height())
+    if host.minimumHeight() != hint:
+        host.setMinimumHeight(hint)
+        host.updateGeometry()
+
+
 def _forward_wheel(widget: QWidget, event) -> bool:
     parent = widget.parentWidget()
     while parent is not None and not isinstance(parent, QScrollArea):
