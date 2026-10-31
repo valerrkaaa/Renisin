@@ -126,6 +126,9 @@ class _SelectableText(QTextEdit):
             available = parent.width() - margins
             if available >= 30 and (width < 30 or available < width):
                 width = available
+        cap = self.maximumWidth()
+        if 30 <= cap < 10_000 and cap < width:
+            width = cap
         if width < 30:
             return
         self._fitting = True
@@ -453,7 +456,7 @@ class _CommandRequest(QFrame):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
         title = QLabel("Запрос на выполнение команды")
-        title.setObjectName("sidebarTitle")
+        title.setObjectName("requestTitle")
         layout.addWidget(title)
         if target:
             where = QLabel(f"MCP: {target}")
@@ -689,7 +692,7 @@ class ChatPane(QWidget):
         head = QHBoxLayout()
         head.setSpacing(8)
         title = QLabel("Чат")
-        title.setObjectName("sidebarTitle")
+        title.setObjectName("chatTitle")
         head.addWidget(title)
         head.addStretch(1)
         self._model_combo = QComboBox()
@@ -790,7 +793,7 @@ class ChatPane(QWidget):
         self._messages_host.setObjectName("historyHost")
         self._messages = QVBoxLayout(self._messages_host)
         self._messages.setContentsMargins(4, 4, 4, 8)
-        self._messages.setSpacing(8)
+        self._messages.setSpacing(10)
         self._messages.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._messages.addStretch(1)
         scroll.setWidget(self._messages_host)
@@ -809,8 +812,8 @@ class ChatPane(QWidget):
         box = QFrame()
         box.setObjectName("inputPanel")
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(8, 4, 8, 4)
-        box_layout.setSpacing(4)
+        box_layout.setContentsMargins(10, 6, 8, 6)
+        box_layout.setSpacing(8)
         self._model_name = QLabel("")
         self._model_name.setObjectName("chatModelName")
         box_layout.addWidget(self._model_name)
@@ -1251,7 +1254,7 @@ class ChatPane(QWidget):
         elif role == "assistant":
             widget = self._assistant_message(shown)
         else:
-            widget = self._bubble(shown, "chatUser")
+            widget = self._user_row(shown)
         widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self._insert_message(widget)
         return widget
@@ -1349,7 +1352,21 @@ class ChatPane(QWidget):
         layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
         return frame
 
+    def _user_row(self, text: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch(1)
+        layout.addWidget(self._bubble(text, "chatUser"), 1)
+        return row
+
     def _bubble(self, text: str, name: str) -> _SelectableText:
+        if name == "chatUser":
+            bubble = _SelectableText(text, name, margin=8, left_margin=14)
+            bubble.setMaximumWidth(320)
+            bubble.setMinimumWidth(48)
+            bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            return bubble
         return _SelectableText(text, name)
 
     def _fit_bubbles(self) -> None:

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
+from application.terminal_mcp import call_record
 from ui.chat_pane import _CommandRequest, _SelectableText, call_note
 from ui.command_card import CommandCard
 from ui.fitted_text import FittedText, clamp_scroll_host, sync_scroll_extent
@@ -277,7 +278,7 @@ class GeneralChatPage(QWidget):
         box = QFrame()
         box.setObjectName("inputPanel")
         row = QHBoxLayout(box)
-        row.setContentsMargins(8, 4, 8, 4)
+        row.setContentsMargins(10, 6, 8, 6)
         row.setSpacing(8)
         self._draft = GrowingText()
         self._draft.setObjectName("loungeDraft")
@@ -565,8 +566,14 @@ class GeneralChatPage(QWidget):
 
         def place_cards(index: int) -> None:
             for card in grouped.get(index, []):
-                card.show()
-                self._transcript.insertWidget(self._transcript.count() - 1, card)
+                if card.is_live():
+                    card.show()
+                    self._transcript.insertWidget(self._transcript.count() - 1, card)
+                    continue
+                # История уже выполненной команды — та же свёрнутая строка, что в чате сессии.
+                card.hide()
+                note = self._stored_command(card.record or _command_record(card))
+                self._transcript.insertWidget(self._transcript.count() - 1, note)
 
         saved = [
             card.record
@@ -672,20 +679,18 @@ class GeneralChatPage(QWidget):
             data = None
         if not isinstance(data, dict):
             return self._bubble("result", text)
-        card = CommandCard(
-            str(data.get("command") or ""),
-            self._mono,
-            target=str(data.get("mcp") or ""),
+        note = call_note(
+            call_record(
+                "выполнено",
+                str(data.get("command") or ""),
+                str(data.get("output") or ""),
+                str(data.get("mcp") or ""),
+            )
         )
-        card.resend_button.hide()
-        card.delete_button.hide()
-        card.attach_button.hide()
-        output = str(data.get("output") or "")
-        if output:
-            fmt = QTextCharFormat()
-            fmt.setFont(self._mono)
-            card.append_output(output, fmt)
-        return card
+        if note is not None:
+            note.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+            return note
+        return self._bubble("result", text)
 
     def _bubble(self, role: str, text: str) -> QWidget:
         if role == "result":
@@ -702,10 +707,10 @@ class GeneralChatPage(QWidget):
         label = _SelectableText(
             text,
             "chatUser" if role == "user" else "chatAssistant",
-            margin=6,
+            margin=8,
             left_margin=14,
         )
-        label.setMaximumWidth(520)
+        label.setMaximumWidth(320 if role == "user" else 520)
         label.setMinimumWidth(48)
         # Подсказка ширины у текста нулевая, и растяжка забирала всю строку:
         # поле оставалось, а буквы не рисовались.

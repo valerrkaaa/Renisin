@@ -140,7 +140,6 @@ QWidget#workArea, QWidget#chatPane {{
 QWidget#sideBar {{
     background: {SIDEBAR};
     color: {TEXT};
-    border-right: 1px solid {BORDER};
 }}
 QWidget#generalChat {{
     background: {CANVAS};
@@ -195,6 +194,10 @@ QLineEdit#loungeTitleEdit, QLineEdit#loungeDraft, QComboBox#loungeModelCombo {{
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS}px;
+    padding: 4px 8px;
+}}
+QComboBox#chatModelCombo, QComboBox#loungeModelCombo {{
+    font-size: 11px;
     padding: 4px 8px;
 }}
 QPlainTextEdit#loungeDraft {{
@@ -271,40 +274,39 @@ QLabel#appTitle {{
     font-size: 13px;
     font-weight: 600;
 }}
-QLabel#sessionLabel {{
+QLabel#sessionLabel, QLabel#chatTitle {{
     color: {TEXT};
+    font-size: 13px;
     font-weight: 600;
     padding-left: 2px;
 }}
+QLabel#requestTitle {{
+    color: {TEXT};
+    font-size: 12px;
+    font-weight: 600;
+}}
 QLabel#statusBadge {{
     color: {OK};
-    background: #14291c;
-    border: 1px solid #245c3a;
-    border-radius: {RADIUS}px;
-    padding: 2px 8px;
+    background: transparent;
+    border: none;
+    padding: 0;
     font-size: 11px;
     font-weight: 600;
 }}
 QLabel#statusBadge[running="true"] {{
     color: #fcd34d;
-    background: #2a230f;
-    border: 1px solid #5c4a16;
 }}
 QLabel#statusBadge[closed="true"] {{
     color: {MUTED};
-    background: {SURFACE};
-    border: 1px solid {BORDER};
 }}
 QLabel#statusBadge[error="true"] {{
     color: {DANGER};
-    background: #2a1518;
-    border: 1px solid #6b2430;
 }}
 QLabel#sidebarTitle {{
     color: {MUTED};
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
 }}
 QListWidget#sessionList, QTreeWidget#sessionList {{
     background: transparent;
@@ -347,7 +349,7 @@ QLabel#sessionName, QLabel#sessionMuted {{
     color: {TEXT};
 }}
 QLabel#sessionMuted {{
-    color: {MUTED};
+    color: {FAINT};
 }}
 QLabel#sessionOffline {{
     color: {DANGER};
@@ -399,23 +401,24 @@ QLabel#chainRoute {{
 }}
 QPlainTextEdit#commandCapture {{
     background: {ACTIVITY};
-    color: {TEXT};
-    border: 1px solid {BORDER};
+    color: {MUTED};
+    border: none;
     border-radius: {RADIUS}px;
-    padding: 6px;
+    padding: 6px 8px;
+    font-size: 11px;
 }}
 QPlainTextEdit#commandCapture:disabled {{
     background: {ACTIVITY};
-    color: {TEXT};
+    color: {MUTED};
 }}
 QFrame#commandCard {{
-    background: transparent;
-    border: none;
-    border-radius: 0;
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
 }}
 QLabel#commandIcon, QLabel#inputPrompt {{
-    color: {FOCUS};
-    font-weight: 700;
+    color: {MUTED};
+    font-weight: 600;
     padding: 0;
 }}
 QLabel#inputPrompt {{
@@ -431,11 +434,11 @@ QLabel#commandText, QTextEdit#commandText, QTextEdit#commandTarget {{
     selection-color: #ffffff;
 }}
 QFrame#commandDivider {{
-    background: {BORDER};
+    background: transparent;
     border: none;
-    min-height: 1px;
-    max-height: 1px;
-    margin: 2px 8px;
+    min-height: 0;
+    max-height: 0;
+    margin: 0;
 }}
 QFrame#cardSeparator {{
     color: {BORDER};
@@ -496,7 +499,7 @@ QCheckBox::indicator {{
     width: 14px;
     height: 14px;
     border-radius: 3px;
-    border: 1px solid {FAINT};
+    border: 1px solid {BORDER};
     background: {INPUT};
 }}
 QCheckBox::indicator:checked {{
@@ -514,7 +517,8 @@ QDialogButtonBox QPushButton:default {{
     background: {ACCENT};
     color: white;
     font-weight: 600;
-    padding: 4px 12px;
+    border: none;
+    padding: 6px 10px;
 }}
 QPushButton#sendButton:hover, QPushButton#composerSend:hover, QPushButton#primaryButton:hover,
 QDialogButtonBox QPushButton:default:hover {{
@@ -556,11 +560,12 @@ QPushButton#secondaryButton:disabled {{
     border-color: {BORDER};
 }}
 QPushButton#auxButton {{
-    background: transparent;
+    background: {SURFACE};
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS}px;
-    padding: 3px 8px;
+    font-weight: 600;
+    padding: 6px 10px;
 }}
 QPushButton#auxButton:hover {{
     background: {SELECTION};
@@ -594,11 +599,11 @@ QPushButton#toolButton:disabled {{
     background: transparent;
 }}
 QPushButton#usageButton {{
-    background: transparent;
+    background: {INPUT};
     color: {MUTED};
     border: 1px solid {BORDER};
     border-radius: {RADIUS}px;
-    padding: 2px 8px;
+    padding: 6px 10px;
     font-size: 11px;
 }}
 QPushButton#usageButton:hover {{
@@ -714,6 +719,16 @@ QTextEdit#shellCodeRich {{
     selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
+QFrame#commandRequest QLabel#shellCode,
+QFrame#commandRequest QTextEdit#shellCode {{
+    color: {TEXT};
+    background: {ACTIVITY};
+    border: none;
+    border-radius: {RADIUS}px;
+    padding: 6px 8px;
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
+}}
 QLabel#shellCode, QTextEdit#shellCode {{
     color: {TEXT};
     background: transparent;
@@ -725,11 +740,13 @@ QLabel#shellCode, QTextEdit#shellCode {{
 QFrame#commandRequest {{
     background: {SURFACE};
     border: 1px solid {BORDER};
-    border-left: 3px solid {ACCENT};
     border-radius: {RADIUS}px;
 }}
-QLabel#commandIntent, QLabel#commandTarget {{
+QLabel#commandIntent {{
     color: {TEXT};
+}}
+QLabel#commandTarget {{
+    color: {MUTED};
 }}
 QLineEdit#commandReason {{
     background: {INPUT};

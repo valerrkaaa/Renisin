@@ -18,6 +18,7 @@ import json
 import domain
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextCharFormat
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -237,12 +238,16 @@ class GeneralChatTests(unittest.TestCase):
         QApplication.processEvents()
         page._select_tab(0)
         QApplication.processEvents()
-        shown = [item for item in page.findChildren(CommandCard) if item.isVisible()]
-        self.assertEqual(len(shown), 1)
-        self.assertIn("ls", shown[0].command)
-        self.assertIn("a.txt", shown[0].output_text())
-        self.assertFalse(shown[0].terminal.isVisible())
-        self.assertEqual(shown[0].findChild(QLabel, "commandTarget").text(), "MCP: консоль")
+        self.assertFalse(any(item.isVisible() for item in page.findChildren(CommandCard)))
+        label = page.findChild(QLabel, "toolCall")
+        self.assertIsNotNone(label)
+        self.assertEqual(label.text(), "выполнено: консоль\n> ls")
+        body = label.parent().findChild(QTextEdit, "commandOutput").parent()
+        self.assertTrue(body.isHidden())
+        QTest.mouseClick(label, Qt.MouseButton.LeftButton)
+        QApplication.processEvents()
+        self.assertFalse(body.isHidden())
+        self.assertIn("a.txt", label.parent().findChild(QTextEdit, "commandOutput").toPlainText())
         self.assertIn("консоль", card.record)
         page.close()
 
@@ -259,18 +264,22 @@ class GeneralChatTests(unittest.TestCase):
             [("user", "покажи"), ("command", payload), ("result", "выполнено: ls\nMCP: консоль")],
         )
         QApplication.processEvents()
-        shown = [item for item in page.findChildren(CommandCard) if not item.isHidden()]
-        self.assertEqual(len(shown), 1)
-        self.assertIn("a.txt", shown[0].output_text())
-        self.assertEqual(shown[0].findChild(QLabel, "commandTarget").text(), "MCP: консоль")
-        notes = [label.text() for label in page.findChildren(QLabel, "toolOutcome")]
-        self.assertIn("MCP: консоль", notes[0])
+        self.assertFalse(any(not item.isHidden() for item in page.findChildren(CommandCard)))
+        label = page.findChild(QLabel, "toolCall")
+        self.assertIsNotNone(label)
+        self.assertEqual(label.text(), "выполнено: консоль\n> ls")
+        body = label.parent().findChild(QTextEdit, "commandOutput").parent()
+        self.assertTrue(body.isHidden())
+        QTest.mouseClick(label, Qt.MouseButton.LeftButton)
+        QApplication.processEvents()
+        self.assertIn("a.txt", label.parent().findChild(QTextEdit, "commandOutput").toPlainText())
         page._add_tab()
         page._select_tab(0)
         QApplication.processEvents()
-        again = [item for item in page.findChildren(CommandCard) if not item.isHidden()]
-        self.assertEqual(len(again), 1)
-        self.assertIn("a.txt", again[0].output_text())
+        again = page.findChild(QLabel, "toolCall")
+        self.assertIsNotNone(again)
+        self.assertEqual(again.text(), "выполнено: консоль\n> ls")
+        self.assertTrue(again.parent().findChild(QTextEdit, "commandOutput").parent().isHidden())
         page.close()
 
     def test_window_opens_general_chat_and_lists_live_mcp(self) -> None:

@@ -248,8 +248,8 @@ class _SessionRow(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4 + depth * 12, 2, 4, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8 + depth * 12, 6, 8, 6)
+        layout.setSpacing(6)
         self._label = QLabel(text)
         self._label.setObjectName(_session_label_name(tone, muted))
         if tip:
@@ -522,7 +522,7 @@ class MainWindow(QMainWindow):
         panel.setObjectName("sideBar")
         panel.setMinimumWidth(100)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 6, 6, 8)
+        layout.setContentsMargins(8, 8, 6, 8)
         layout.setSpacing(2)
 
         head = QHBoxLayout()
@@ -583,7 +583,7 @@ class MainWindow(QMainWindow):
         root.setSpacing(8)
 
         header = QHBoxLayout()
-        header.setSpacing(4)
+        header.setSpacing(8)
 
         self._sessions_toggle = self._panel_toggle(
             sidebar_icon("left"), "Показать или скрыть список сессий"
@@ -675,8 +675,8 @@ class MainWindow(QMainWindow):
         input_panel = QFrame()
         input_panel.setObjectName("inputPanel")
         input_layout = QHBoxLayout(input_panel)
-        input_layout.setContentsMargins(8, 4, 8, 4)
-        input_layout.setSpacing(4)
+        input_layout.setContentsMargins(10, 6, 8, 6)
+        input_layout.setSpacing(8)
         input_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.paste_button = QPushButton()
@@ -2668,7 +2668,7 @@ class MainWindow(QMainWindow):
     def _command_divider(self) -> QFrame:
         line = QFrame()
         line.setObjectName("commandDivider")
-        line.setFixedHeight(1)
+        line.setFixedHeight(0)
         return line
 
     def _scroll_to_bottom(self, scroll: Optional[QScrollArea] = None) -> None:

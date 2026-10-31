@@ -27,8 +27,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -182,7 +180,6 @@ def stylesheet(design: Design) -> str:
     QWidget#canvas {{ background: {design.canvas}; color: {design.text}; }}
     QWidget#sidebar {{
         background: {design.sidebar};
-        border-right: 1px solid {design.border};
     }}
     QWidget#activity {{
         background: {design.activity};
@@ -206,7 +203,7 @@ def stylesheet(design: Design) -> str:
         color: {design.muted};
         font-size: 11px;
         font-weight: 600;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.04em;
     }}
     QLabel#muted {{ color: {design.muted}; }}
     QLabel#title {{ font-size: 18px; font-weight: 600; }}
@@ -220,7 +217,67 @@ def stylesheet(design: Design) -> str:
         border: 1px solid {design.border};
         border-radius: {radius}px;
     }}
-    QFrame#request {{ border-left: 3px solid {design.accent}; }}
+    QWidget#prompt, QWidget#composer {{
+        background: {design.input};
+        border: 1px solid {design.border};
+        border-radius: {radius}px;
+    }}
+    QLabel#status, QLabel#ready {{
+        color: {design.ok};
+        font-weight: 600;
+    }}
+    QLabel#ready {{ font-size: 10px; }}
+    QLabel#status {{ font-size: 11px; }}
+    QLabel#sessionTitle, QLabel#chatTitle {{
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QLabel#arrow, QLabel#output, QLabel#note, QLabel#placeholder {{
+        color: {design.muted};
+    }}
+    QLabel#arrow, QLabel#code, QLabel#output, QLabel#preview, QLabel#capture {{
+        font-family: "{design.mono}";
+    }}
+    QLabel#code {{ font-weight: 600; }}
+    QLabel#preview, QLabel#capture {{
+        background: {design.activity};
+        border-radius: {radius}px;
+        padding: 6px 8px;
+    }}
+    QLabel#capture {{ color: {design.muted}; font-size: 11px; }}
+    QLabel#user {{
+        background: {design.selection};
+        border-radius: {radius}px;
+        padding: 8px 10px 8px 14px;
+    }}
+    QLabel#model, QLabel#usage {{
+        background: {design.input};
+        border: 1px solid {design.border};
+        border-radius: {radius}px;
+        padding: 4px 8px;
+    }}
+    QLabel#usage {{ color: {design.muted}; font-size: 11px; padding: 6px 10px; }}
+    QFrame#rule {{
+        background: {design.border};
+        max-height: 1px;
+        border: none;
+    }}
+    QWidget#sessionRow {{
+        background: {design.sidebar};
+        border-radius: {min(radius, 6)}px;
+    }}
+    QWidget#sessionRow[active="true"] {{ background: {design.selection}; }}
+    QLabel#sessionMuted {{ color: {design.muted}; }}
+    QPushButton#tool {{
+        background: transparent;
+        border: none;
+        color: {design.muted};
+        padding: 0;
+        min-width: 22px;
+        max-width: 22px;
+        min-height: 22px;
+        max-height: 22px;
+    }}
     QListWidget {{
         background: transparent;
         border: none;
@@ -383,31 +440,34 @@ def _request_card(on_action) -> QFrame:
     card = QFrame()
     card.setObjectName("request")
     layout = QVBoxLayout(card)
-    layout.setContentsMargins(14, 12, 14, 12)
+    layout.setContentsMargins(10, 8, 10, 8)
     layout.setSpacing(8)
-    eyebrow = QLabel("ЗАПРОС КОМАНДЫ")
-    eyebrow.setObjectName("eyebrow")
-    layout.addWidget(eyebrow)
-    intent = QLabel("Проверить свободное место на диске")
-    intent.setWordWrap(True)
-    layout.addWidget(intent)
-    where = QLabel("prod-web  ·  MCP")
+    title = QLabel("Запрос на выполнение команды")
+    title.setObjectName("chatTitle")
+    layout.addWidget(title)
+    where = QLabel("MCP: k8s")
     where.setObjectName("muted")
     layout.addWidget(where)
-    code = QLabel("df -h")
-    code.setObjectName("code")
-    layout.addWidget(code)
+    intent = QLabel("Снять нагрузку процессора")
+    intent.setWordWrap(True)
+    layout.addWidget(intent)
+    preview = QLabel("Команда: mpstat 1 2 | tail -n 5")
+    preview.setObjectName("preview")
+    layout.addWidget(preview)
+    capture = QLabel("Linux 6.8.0-k8s (k8s-control-plane)\n%usr  %sys  %idle\n 4.2   1.1  94.0")
+    capture.setObjectName("capture")
+    layout.addWidget(capture)
     row = QHBoxLayout()
-    run = QPushButton("Выполнить")
-    run.setObjectName("primary")
-    run.clicked.connect(lambda: on_action("run"))
-    rule = QPushButton("Добавить правило")
-    rule.clicked.connect(lambda: on_action("rule"))
-    reject = QPushButton("Отклонить")
-    reject.setObjectName("danger")
+    row.setSpacing(8)
+    send = QPushButton("Отправить")
+    send.setObjectName("primary")
+    send.clicked.connect(lambda: on_action("send"))
+    redact = QPushButton("Обезличить")
+    redact.clicked.connect(lambda: on_action("redact"))
+    reject = QPushButton("Отклонить по причине")
     reject.clicked.connect(lambda: on_action("reject"))
-    row.addWidget(run)
-    row.addWidget(rule)
+    row.addWidget(send)
+    row.addWidget(redact)
     row.addWidget(reject)
     row.addStretch(1)
     layout.addLayout(row)
@@ -431,116 +491,182 @@ class TemplateWindow(QMainWindow):
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        body.addWidget(self._activity())
         body.addWidget(self._sidebar())
         body.addWidget(self._stage(), 1)
         body.addWidget(self._inspector())
         outer.addLayout(body, 1)
-        outer.addWidget(self._status())
         self.setCentralWidget(root)
         self._apply()
-
-    def _activity(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName("activity")
-        bar.setFixedWidth(48)
-        layout = QVBoxLayout(bar)
-        layout.setContentsMargins(4, 8, 4, 8)
-        layout.setSpacing(4)
-        for glyph, checked in (("⌘", True), ("≡", False), ("⚙", False)):
-            button = QPushButton(glyph)
-            button.setObjectName("activityButton")
-            button.setCheckable(True)
-            button.setChecked(checked)
-            button.setFixedHeight(36)
-            layout.addWidget(button)
-        layout.addStretch(1)
-        return bar
 
     def _sidebar(self) -> QWidget:
         side = QWidget()
         side.setObjectName("sidebar")
-        side.setFixedWidth(240)
+        side.setFixedWidth(200)
         layout = QVBoxLayout(side)
-        layout.setContentsMargins(12, 14, 12, 12)
-        layout.setSpacing(8)
-        title = QLabel("ПОДКЛЮЧЕНИЯ")
+        layout.setContentsMargins(8, 8, 6, 8)
+        layout.setSpacing(2)
+        head = QHBoxLayout()
+        head.setSpacing(2)
+        title = QLabel("СЕССИИ")
         title.setObjectName("eyebrow")
-        layout.addWidget(title)
-        sessions = QListWidget()
-        sessions.addItems(("Общий чат", "prod-web", "jump → app", "локальная CMD"))
-        sessions.setCurrentRow(1)
-        layout.addWidget(sessions, 1)
+        head.addWidget(title, 1)
+        for glyph in ("+", "▣", "⚙"):
+            button = QPushButton(glyph)
+            button.setObjectName("tool")
+            head.addWidget(button)
+        layout.addLayout(head)
+        for text, kind in (
+            ("общий чат для ИИ", "plain"),
+            ("▾  кластер", "plain"),
+            ("k8s-control-plane", "active"),
+            ("demo", "muted"),
+            ("local", "dot"),
+        ):
+            layout.addWidget(self._session(text, kind))
+        layout.addStretch(1)
         return side
+
+    def _session(self, text: str, kind: str) -> QWidget:
+        row = QWidget()
+        row.setObjectName("sessionRow")
+        if kind == "active":
+            row.setProperty("active", "true")
+        nested = kind in ("active", "muted")
+        box = QHBoxLayout(row)
+        box.setContentsMargins(20 if nested else 8, 6, 8, 6)
+        box.setSpacing(6)
+        if kind in ("active", "dot"):
+            dot = QLabel("●")
+            dot.setObjectName("ready" if kind == "active" else "status")
+            box.addWidget(dot)
+        name = QLabel(text)
+        name.setObjectName("sessionMuted" if kind == "muted" else "sessionName")
+        box.addWidget(name, 1)
+        if kind == "active":
+            badge = QLabel("READY")
+            badge.setObjectName("ready")
+            box.addWidget(badge)
+        return row
 
     def _stage(self) -> QWidget:
         stage = QWidget()
         stage.setObjectName("canvas")
-        layout = QVBoxLayout(stage)
-        layout.setContentsMargins(22, 18, 22, 18)
-        layout.setSpacing(14)
-        title = QLabel("Превью")
-        title.setObjectName("title")
-        layout.addWidget(title)
-        lead = QLabel(
-            "Слева список, по центру запрос команды и карточка вывода, "
-            "справа параметры. Всплывающие окна используют тот же конфиг."
-        )
-        lead.setObjectName("muted")
-        lead.setWordWrap(True)
-        layout.addWidget(lead)
+        layout = QHBoxLayout(stage)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+        layout.addWidget(self._terminal(), 1)
+        layout.addWidget(self._chat())
+        return stage
 
-        actions = QHBoxLayout()
-        confirm = QPushButton("Подтверждение")
-        confirm.clicked.connect(self._ask_confirm)
-        form = QPushButton("Диалог")
-        form.clicked.connect(self._open_form)
-        approve = QPushButton("Окно одобрения")
-        approve.setObjectName("primary")
-        approve.clicked.connect(self._open_approval)
-        actions.addWidget(confirm)
-        actions.addWidget(form)
-        actions.addWidget(approve)
-        actions.addStretch(1)
-        layout.addLayout(actions)
-
-        self._note = QLabel("Выберите пресет или поменяйте цвет.")
-        self._note.setObjectName("muted")
-        self._note.setWordWrap(True)
-        layout.addWidget(self._note)
-        layout.addWidget(_request_card(self._on_decision))
-
-        done = QFrame()
-        done.setObjectName("card")
-        card = QVBoxLayout(done)
-        card.setContentsMargins(14, 12, 14, 12)
-        card.setSpacing(6)
-        header = QLabel("КОМАНДА")
-        header.setObjectName("eyebrow")
-        card.addWidget(header)
-        command = QLabel("uname -srm")
-        command.setObjectName("code")
-        card.addWidget(command)
-        output = QLabel("Linux 6.8.0-45-generic x86_64")
-        output.setObjectName("muted")
-        card.addWidget(output)
-        layout.addWidget(done)
-
-        rules_label = QLabel("СПИСОК ПРАВИЛ")
-        rules_label.setObjectName("eyebrow")
-        layout.addWidget(rules_label)
-        rules = QListWidget()
-        rules.addItems(
-            (
-                "Разрешено    ls, df, uname",
-                "Спросить     systemctl, apt",
-                "Запрещено    rm -rf, mkfs",
+    def _terminal(self) -> QWidget:
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        status = QLabel("READY")
+        status.setObjectName("status")
+        name = QLabel("k8s-control-plane")
+        name.setObjectName("sessionTitle")
+        gear = QPushButton("⚙")
+        gear.setObjectName("tool")
+        head.addWidget(status)
+        head.addWidget(name)
+        head.addWidget(gear)
+        head.addStretch(1)
+        layout.addLayout(head)
+        layout.addWidget(self._command("hostname", "k8s-control-plane"))
+        layout.addWidget(
+            self._command(
+                "cat /proc/loadavg && uptime",
+                "0.07 0.03 0.00 1/564 7909\n"
+                "15:18:15 up 11:52,  4 users,  load average: 0.07, 0.03, 0.00",
             )
         )
-        rules.setFixedHeight(120)
-        layout.addWidget(rules)
         layout.addStretch(1)
-        return stage
+        layout.addWidget(self._field("команда…", mono=True))
+        return column
+
+    def _command(self, command: str, output: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        arrow = QLabel("❯")
+        arrow.setObjectName("arrow")
+        text = QLabel(command)
+        text.setObjectName("code")
+        head.addWidget(arrow)
+        head.addWidget(text, 1)
+        layout.addLayout(head)
+        rule = QFrame()
+        rule.setObjectName("rule")
+        rule.setFixedHeight(1)
+        layout.addWidget(rule)
+        body = QLabel(output)
+        body.setObjectName("output")
+        body.setWordWrap(True)
+        layout.addWidget(body)
+        return card
+
+    def _field(self, placeholder: str, mono: bool) -> QWidget:
+        box = QWidget()
+        box.setObjectName("prompt" if mono else "composer")
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(10, 6, 8, 6)
+        layout.setSpacing(8)
+        hint = QLabel(placeholder)
+        hint.setObjectName("placeholder")
+        if mono:
+            hint.setFont(QFont(self._design.mono, 10))
+        layout.addWidget(hint, 1)
+        send = QPushButton("Отправить")
+        send.setObjectName("primary")
+        layout.addWidget(send)
+        return box
+
+    def _chat(self) -> QWidget:
+        column = QWidget()
+        column.setFixedWidth(420)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        title = QLabel("Чат")
+        title.setObjectName("chatTitle")
+        model = QLabel("local · qwen")
+        model.setObjectName("model")
+        auto = QLabel("✓  Авто")
+        review = QLabel("✓  Просмотр")
+        usage = QLabel("1.2k / 8192")
+        usage.setObjectName("usage")
+        head.addWidget(title)
+        head.addWidget(model)
+        head.addWidget(auto)
+        head.addWidget(review)
+        head.addWidget(usage)
+        head.addStretch(1)
+        layout.addLayout(head)
+        user_row = QHBoxLayout()
+        user_row.addStretch(1)
+        user = QLabel("Покажи аптайм и нагрузку на control-plane")
+        user.setObjectName("user")
+        user.setWordWrap(True)
+        user.setMaximumWidth(320)
+        user_row.addWidget(user)
+        layout.addLayout(user_row)
+        note = QLabel("выполнено: k8s\n> uptime")
+        note.setObjectName("note")
+        layout.addWidget(note)
+        layout.addWidget(_request_card(self._on_decision))
+        layout.addStretch(1)
+        layout.addWidget(self._field("Сообщение модели…", mono=False))
+        return column
 
     def _inspector(self) -> QWidget:
         panel = QWidget()
@@ -552,6 +678,18 @@ class TemplateWindow(QMainWindow):
         title = QLabel("Параметры")
         title.setObjectName("title")
         layout.addWidget(title)
+        self._note = QLabel("Выберите пресет или поменяйте цвет.")
+        self._note.setObjectName("muted")
+        self._note.setWordWrap(True)
+        layout.addWidget(self._note)
+        tools = QHBoxLayout()
+        confirm = QPushButton("Подтверждение")
+        confirm.clicked.connect(self._ask_confirm)
+        form = QPushButton("Диалог")
+        form.clicked.connect(self._open_form)
+        tools.addWidget(confirm)
+        tools.addWidget(form)
+        layout.addLayout(tools)
 
         self._preset = QComboBox()
         self._preset.addItems(list(PRESETS))
@@ -636,18 +774,6 @@ class TemplateWindow(QMainWindow):
         self._font = box
         return box
 
-    def _status(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName("statusBar")
-        bar.setFixedHeight(26)
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 0, 12, 0)
-        self._status_label = QLabel(self._design.preset)
-        self._status_label.setStyleSheet("color:white; background:transparent;")
-        layout.addWidget(self._status_label)
-        layout.addStretch(1)
-        return bar
-
     def _load_preset(self, name: str) -> None:
         if self._lock or name not in PRESETS:
             return
@@ -686,7 +812,7 @@ class TemplateWindow(QMainWindow):
             app.setStyleSheet(sheet)
         self.setStyleSheet(sheet)
         self._config.setPlainText(self._payload())
-        self._status_label.setText(self._design.preset)
+        self.setWindowTitle(f"Renisin — {self._design.preset}")
         self._note.setText(f"Сейчас: {self._design.preset}. Конфиг справа обновляется сразу.")
 
     def _payload(self) -> str:
@@ -717,7 +843,7 @@ class TemplateWindow(QMainWindow):
         ApprovalDialog(self).exec()
 
     def _on_decision(self, action: str) -> None:
-        labels = {"run": "выполнить", "rule": "правило", "reject": "отклонить"}
+        labels = {"send": "отправить", "redact": "обезличить", "reject": "отклонить"}
         self._note.setText(f"Запрос команды: {labels.get(action, action)}.")
 
 

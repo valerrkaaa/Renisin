@@ -65,7 +65,7 @@ class CommandCard(QFrame):
         layout.setSpacing(8)
 
         header = QHBoxLayout()
-        header.setSpacing(2)
+        header.setSpacing(8)
         header.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         icon = QLabel("❯")
