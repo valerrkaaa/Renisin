@@ -35,6 +35,39 @@ from storage.command_allow import FileCommandAllowStore
 from storage.mcp_settings import FileMcpSettings
 
 
+def _reject_with_reason(root, reason: str = "не надо") -> bool:
+    """Нажать «Отклонить по причине» и отправить текст, если карточка уже на экране."""
+    from PySide6.QtWidgets import QLineEdit, QPushButton
+
+    button = next(
+        (
+            item
+            for item in root.findChildren(QPushButton)
+            if item.text() == "Отклонить по причине" and item.isVisible() and item.isEnabled()
+        ),
+        None,
+    )
+    if button is None:
+        return False
+    button.click()
+    field = root.findChild(QLineEdit, "commandReason")
+    if field is None:
+        return False
+    field.setText(reason)
+    send = next(
+        (
+            item
+            for item in root.findChildren(QPushButton)
+            if item.text() == "Отправить отказ" and item.isEnabled()
+        ),
+        None,
+    )
+    if send is None:
+        return False
+    send.click()
+    return True
+
+
 class _Journal:
     def __init__(self) -> None:
         self.events = []
@@ -448,6 +481,49 @@ class McpCommandTests(unittest.TestCase):
         )
         self.assertNotIn("rm y", driver.sent)
 
+    def test_another_session_runs_while_one_command_is_still_going(self) -> None:
+        service, driver, profiles = _world()
+        first = _session(service, profiles)
+        second = service.create_session("вторая", "pw", llm_profile_id="m-1")
+        service._command_allow.remember(first.session_id, "hold")
+        service._command_allow.remember(second.session_id, "echo ok")
+        started = threading.Event()
+        release = threading.Event()
+        original = driver.send
+
+        def send(request) -> None:
+            if request.text.strip() == "hold":
+                started.set()
+                release.wait(3)
+            original(request)
+
+        driver.send = send
+        box: dict = {}
+
+        def run_hold() -> None:
+            box["hold"] = service.run_mcp_command(first.session_id, "жди", "hold")
+
+        holder = threading.Thread(target=run_hold)
+        holder.start()
+        self.assertTrue(started.wait(2))
+        finished = threading.Event()
+
+        def run_other() -> None:
+            box["other"] = service.run_mcp_command(second.session_id, "эхо", "echo ok")
+            finished.set()
+
+        threading.Thread(target=run_other).start()
+        try:
+            self.assertTrue(
+                finished.wait(1),
+                "команда второй сессии ждала выполнение в первой",
+            )
+        finally:
+            release.set()
+        holder.join(3)
+        self.assertIn("a.txt", box.get("other", ""))
+        self.assertIn("a.txt", box.get("hold", ""))
+
     def test_deliver_returns_body_without_running_again(self) -> None:
         service, driver, profiles = _world()
         info = _session(service, profiles)
@@ -578,6 +654,18 @@ class McpCommandTests(unittest.TestCase):
         self.assertEqual(result, refusal_reason(INTERACTIVE_REASON))
         self.assertIn("nano", driver.sent)
         self.assertTrue(driver.cancelled.is_set())
+
+    def test_interactive_approval_waits_for_the_user(self) -> None:
+        driver = _Driver()
+        service, driver, profiles = _world(driver)
+        info = _session(service, profiles)
+        model_text, output, code = service.capture_mcp_output(
+            info.session_id, "nano", interactive_ok=True
+        )
+        self.assertFalse(driver.cancelled.is_set())
+        self.assertTrue(model_text.startswith("выполнено"))
+        self.assertIn("nano", output)
+        self.assertEqual(code, 0)
 
     def test_spawned_shell_is_closed(self) -> None:
         driver = _Driver()
@@ -1154,11 +1242,17 @@ class ChatCardTests(unittest.TestCase):
         pane.command_decided.connect(lambda *args: seen.append(args))
         pane.show_command_request("id-1", "посмотреть файлы в текущей директории", "ls")
         QApplication.processEvents()
-        self.assertEqual(pane.findChild(QLabel, "shellCode").text(), "Команда: ls")
         buttons = {button.text(): button for button in pane.findChildren(QPushButton)}
-        for title in ("Выполнить", "Добавить правило", "Отклонить", "Отклонить по причине"):
+        for title in ("Выполнить", "Добавить правило", "Отклонить по причине"):
             self.assertIn(title, buttons)
+        self.assertNotIn("Отклонить", buttons)
         self.assertNotIn("Всегда выполнять", buttons)
+        title = pane.findChild(QLabel, "requestTitle")
+        rule = buttons["Добавить правило"]
+        self.assertIsNotNone(title)
+        assert title is not None
+        self.assertGreater(rule.x(), title.x())
+        self.assertLessEqual(rule.y(), title.y() + title.height())
         field = pane.findChild(QLineEdit, "commandReason")
         self.assertIsNotNone(field)
         assert field is not None
@@ -1166,6 +1260,7 @@ class ChatCardTests(unittest.TestCase):
         buttons["Отклонить по причине"].click()
         QApplication.processEvents()
         self.assertTrue(field.isVisible())
+        self.assertTrue(field.hasFocus())
         field.setText("не надо")
         buttons["Отправить отказ"].click()
         self.assertEqual(seen, [("id-1", "reject_reason", "не надо")])
@@ -1640,12 +1735,8 @@ class ChatCardTests(unittest.TestCase):
         clicked = False
         while time.time() < deadline and thread.is_alive():
             QApplication.processEvents()
-            for button in window.chat_pane.findChildren(QPushButton):
-                if button.text() == "Отклонить" and button.isEnabled():
-                    button.click()
-                    clicked = True
-                    break
-            if clicked:
+            if _reject_with_reason(window.chat_pane):
+                clicked = True
                 break
             time.sleep(0.02)
         thread.join(timeout=3)
@@ -1656,8 +1747,420 @@ class ChatCardTests(unittest.TestCase):
         ]
         window.close()
         self.assertTrue(clicked)
-        self.assertEqual(box.get("result"), refusal())
-        self.assertIn("отклонено\nls", notes)
+        self.assertEqual(box.get("result"), refusal_reason("не надо"))
+        self.assertIn("отклонено с комментарием не надо\nls", notes)
+
+    def test_parallel_requests_wait_their_turn_and_survive_a_chat_switch(self) -> None:
+        from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+
+        from ui.main_window import MainWindow
+
+        service, _driver, profiles = _world()
+        first = _session(service, profiles)
+        second = service.create_session("вторая", "pw", llm_profile_id="m-1")
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(first.session_id)
+        QApplication.processEvents()
+        results: dict = {}
+
+        def run(name: str, command: str) -> None:
+            results[command] = service.run_mcp_command(first.session_id, name, command)
+
+        threads = [
+            threading.Thread(target=run, args=("первый", "echo one")),
+            threading.Thread(target=run, args=("второй", "echo two")),
+        ]
+        for thread in threads:
+            thread.start()
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            QApplication.processEvents()
+            queued = window._mcp_queue.get(first.session_id, [])
+            if first.session_id in window._mcp_pending and len(queued) == 1:
+                break
+        else:
+            self.fail("обе команды не встали в очередь")
+
+        def intents() -> list:
+            QApplication.processEvents()
+            return [
+                label.text()
+                for label in window.chat_pane.findChildren(QLabel, "commandIntent")
+                if label.isVisible()
+            ]
+
+        shown = intents()
+        self.assertEqual(len(shown), 1)
+        opened = shown[0]
+        self.assertIn(opened, ("первый", "второй"))
+
+        window._activate_session(second.session_id)
+        QApplication.processEvents()
+        self.assertEqual(intents(), [])
+        window._activate_session(first.session_id)
+        QApplication.processEvents()
+        self.assertEqual(intents(), [opened])
+
+        self.assertTrue(_reject_with_reason(window.chat_pane))
+        QApplication.processEvents()
+        followed = intents()
+        self.assertEqual(len(followed), 1)
+        self.assertNotEqual(followed[0], opened)
+        self.assertTrue(_reject_with_reason(window.chat_pane))
+        for thread in threads:
+            thread.join(timeout=3)
+        QApplication.processEvents()
+        self.assertEqual(intents(), [])
+        self.assertEqual(results["echo one"], refusal_reason("не надо"))
+        self.assertEqual(results["echo two"], refusal_reason("не надо"))
+        window.close()
+
+    def test_finishing_one_request_opens_the_next_chat(self) -> None:
+        from PySide6.QtWidgets import QApplication, QLabel
+
+        from ui.main_window import MainWindow
+
+        service, _driver, profiles = _world()
+        first = _session(service, profiles)
+        second = service.create_session("вторая", "pw", llm_profile_id="m-1")
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(first.session_id)
+        QApplication.processEvents()
+        results: dict = {}
+
+        def run(session_id: str, name: str, command: str) -> None:
+            results[command] = service.run_mcp_command(session_id, name, command)
+
+        threads = [
+            threading.Thread(target=run, args=(first.session_id, "первый", "echo one")),
+            threading.Thread(target=run, args=(second.session_id, "второй", "echo two")),
+        ]
+        try:
+            threads[0].start()
+            self._wait_intent(window, "первый")
+            threads[1].start()
+            self._wait_pending(window, second.session_id)
+            QApplication.processEvents()
+            self.assertEqual(window._active_session_id, first.session_id)
+            self.assertEqual(self._visible_intents(window), ["первый"])
+
+            self.assertTrue(_reject_with_reason(window.chat_pane))
+            QApplication.processEvents()
+            self.assertEqual(window._active_session_id, second.session_id)
+            self.assertEqual(self._visible_intents(window), ["второй"])
+            self.assertTrue(_reject_with_reason(window.chat_pane))
+            for thread in threads:
+                thread.join(timeout=3)
+            self.assertEqual(results["echo one"], refusal_reason("не надо"))
+            self.assertEqual(results["echo two"], refusal_reason("не надо"))
+        finally:
+            window._drop_mcp_pending("тест")
+            for thread in threads:
+                thread.join(timeout=2)
+            window.close()
+
+    def test_manual_request_out_of_order_keeps_the_rest_of_the_sequence(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        from ui.main_window import MainWindow
+
+        service, _driver, profiles = _world()
+        first = _session(service, profiles)
+        second = service.create_session("вторая", "pw", llm_profile_id="m-1")
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(first.session_id)
+        QApplication.processEvents()
+        results: dict = {}
+
+        def run(session_id: str, name: str, command: str) -> None:
+            results[command] = service.run_mcp_command(session_id, name, command)
+
+        threads = [
+            threading.Thread(target=run, args=(first.session_id, "первый", "echo one")),
+            threading.Thread(target=run, args=(second.session_id, "второй", "echo two")),
+            threading.Thread(target=run, args=(first.session_id, "третий", "echo three")),
+        ]
+        try:
+            threads[0].start()
+            self._wait_intent(window, "первый")
+            threads[1].start()
+            self._wait_pending(window, second.session_id)
+            threads[2].start()
+            self._wait_queued(window, first.session_id)
+            self.assertEqual(self._visible_intents(window), ["первый"])
+
+            window._activate_session(second.session_id)
+            QApplication.processEvents()
+            self.assertEqual(self._visible_intents(window), ["второй"])
+            self.assertTrue(_reject_with_reason(window.chat_pane))
+            QApplication.processEvents()
+            self.assertEqual(window._active_session_id, first.session_id)
+            self.assertEqual(self._visible_intents(window), ["первый"])
+            queued = window._mcp_queue.get(first.session_id, [])
+            self.assertEqual([item[0].intent for item in queued], ["третий"])
+
+            self.assertTrue(_reject_with_reason(window.chat_pane))
+            QApplication.processEvents()
+            self.assertEqual(window._active_session_id, first.session_id)
+            self.assertEqual(self._visible_intents(window), ["третий"])
+            self.assertTrue(_reject_with_reason(window.chat_pane))
+            for thread in threads:
+                thread.join(timeout=3)
+            self.assertEqual(results["echo one"], refusal_reason("не надо"))
+            self.assertEqual(results["echo two"], refusal_reason("не надо"))
+            self.assertEqual(results["echo three"], refusal_reason("не надо"))
+        finally:
+            window._drop_mcp_pending("тест")
+            for thread in threads:
+                thread.join(timeout=2)
+            window.close()
+
+    def _wait_intent(self, window, intent: str) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if self._visible_intents(window) == [intent]:
+                return
+            time.sleep(0.02)
+        self.fail(f"не дождались запроса {intent}")
+
+    def _wait_pending(self, window, session_id: str) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if session_id in window._mcp_pending:
+                return
+            time.sleep(0.02)
+        self.fail("запрос второй сессии не встал в очередь")
+
+    def _wait_queued(self, window, session_id: str) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if window._mcp_queue.get(session_id):
+                return
+            time.sleep(0.02)
+        self.fail("третья команда не встала в очередь чата")
+
+    @staticmethod
+    def _visible_intents(window) -> list:
+        from PySide6.QtWidgets import QApplication, QLabel
+
+        QApplication.processEvents()
+        return [
+            label.text()
+            for label in window.chat_pane.findChildren(QLabel, "commandIntent")
+            if label.isVisible()
+        ]
+
+    def test_approval_block_accepts_a_password_and_screen_keys(self) -> None:
+        from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
+
+        from application.terminal_mcp import CommandAsk
+        from ui.main_window import MainWindow
+        from ui.terminal_view import TerminalView
+
+        service, _driver, profiles = _world()
+        info = _session(service, profiles)
+        typed: list = []
+        service.write_input = lambda session_id, data: typed.append((session_id, data))
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        prompt = CommandAsk("id-sudo", info.session_id, "обновить", "sudo apt update")
+        window._reviewing[prompt.request_id] = (prompt, lambda _answer: None)
+        window.chat_pane.show_command_request(
+            prompt.request_id, prompt.intent, prompt.command, (prompt.command,)
+        )
+        window.chat_pane.show_command_running(prompt.request_id)
+        QApplication.processEvents()
+        window._feed_hidden_command(domain.TranscriptEvent(
+            event_id=domain.new_event_id(),
+            session_id=info.session_id,
+            sequence=1,
+            event_type=domain.EventType.OUTPUT_CHUNK,
+            timestamp=datetime.now(),
+            command_id="sudo-1",
+            stream_type=domain.StreamType.STDOUT,
+            payload="[sudo] password for user: ",
+            persist=False,
+        ))
+        QApplication.processEvents()
+        field = window.chat_pane.findChild(QLineEdit, "commandStdin")
+        assert field is not None
+        self.assertTrue(field.isVisible())
+        self.assertEqual(field.echoMode(), QLineEdit.EchoMode.Password)
+        field.setText("secret")
+        field.returnPressed.emit()
+        self.assertEqual(typed, [(info.session_id, "secret\n")])
+        self.assertNotIn("secret", window.chat_pane._request_card._output.toPlainText())
+
+        window._feed_hidden_command(domain.TranscriptEvent(
+            event_id=domain.new_event_id(),
+            session_id=info.session_id,
+            sequence=2,
+            event_type=domain.EventType.OUTPUT_CHUNK,
+            timestamp=datetime.now(),
+            command_id="sudo-1",
+            stream_type=domain.StreamType.STDOUT,
+            payload="\x1b[?1049hnano",
+            persist=False,
+            alternate=True,
+            columns=80,
+            rows=24,
+        ))
+        QApplication.processEvents()
+        screen = window.chat_pane.findChild(TerminalView, "commandScreen")
+        assert isinstance(screen, QWidget)
+        self.assertTrue(screen.isVisible())
+        self.assertFalse(field.isVisible())
+        screen.input_generated.emit("q")
+        self.assertEqual(typed[-1], (info.session_id, "q"))
+        window.close()
+
+    def test_capture_wheel_stays_inside_the_preview(self) -> None:
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtGui import QFont, QWheelEvent
+        from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget
+
+        from ui.chat_pane import _CommandRequest
+
+        card = _CommandRequest("id-wheel", "список", "ls", QFont("Consolas"), parts=("ls",))
+        card.show_result("\n".join(f"строка {index}" for index in range(80)), "выполнено", 0)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.addWidget(card)
+        layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidget(host)
+        scroll.setWidgetResizable(True)
+        scroll.resize(420, 180)
+        host.setMinimumHeight(900)
+        scroll.show()
+        QApplication.processEvents()
+        capture = card._output
+        capture.verticalScrollBar().setValue(0)
+        scroll.verticalScrollBar().setValue(40)
+        event = QWheelEvent(
+            QPoint(12, 12),
+            capture.viewport().mapToGlobal(QPoint(12, 12)),
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(capture.viewport(), event)
+        if not event.isAccepted():
+            QApplication.sendEvent(scroll.viewport(), event)
+        QApplication.processEvents()
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(capture.verticalScrollBar().value(), 0)
+        self.assertEqual(scroll.verticalScrollBar().value(), 40)
+
+        bar = capture.verticalScrollBar()
+        bar.setValue(max(1, bar.maximum() // 2))
+        before = bar.value()
+        down = QWheelEvent(
+            QPoint(12, 12),
+            capture.viewport().mapToGlobal(QPoint(12, 12)),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(capture.viewport(), down)
+        QApplication.processEvents()
+        self.assertGreater(bar.value(), before)
+        self.assertEqual(scroll.verticalScrollBar().value(), 40)
+
+        short = _CommandRequest("id-short", "список", "ls", QFont("Consolas"), parts=("ls",))
+        short.show_result("коротко", "выполнено", 0)
+        layout.addWidget(short)
+        QApplication.processEvents()
+        quiet = short._output
+        self.assertEqual(quiet.verticalScrollBar().maximum(), 0)
+        quiet_event = QWheelEvent(
+            QPoint(12, 12),
+            quiet.viewport().mapToGlobal(QPoint(12, 12)),
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(quiet.viewport(), quiet_event)
+        if not quiet_event.isAccepted():
+            QApplication.sendEvent(scroll.viewport(), quiet_event)
+        QApplication.processEvents()
+        self.assertTrue(quiet_event.isAccepted())
+        self.assertEqual(scroll.verticalScrollBar().value(), 40)
+        scroll.close()
+
+    def test_edit_before_run_sends_the_changed_command_quietly(self) -> None:
+        from PySide6.QtWidgets import QApplication, QCheckBox, QPlainTextEdit, QPushButton
+
+        from ui.main_window import MainWindow
+
+        service, driver, profiles = _world()
+        info = _session(service, profiles)
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        window.chat_pane.findChild(QCheckBox, "reviewOutput").setChecked(False)
+        box: dict = {}
+
+        def work() -> None:
+            box["result"] = service.run_mcp_command(info.session_id, "список", "ls")
+
+        thread = threading.Thread(target=work)
+        thread.start()
+        deadline = time.time() + 3
+        edit = None
+        while time.time() < deadline and thread.is_alive():
+            QApplication.processEvents()
+            for button in window.chat_pane.findChildren(QPushButton):
+                if button.text() == "Отредактировать перед выполнением" and button.isEnabled():
+                    edit = button
+                    break
+            if edit is not None:
+                break
+            time.sleep(0.02)
+        assert edit is not None
+        edit.click()
+        QApplication.processEvents()
+        field = window.chat_pane.findChild(QPlainTextEdit, "commandEdit")
+        assert field is not None
+        self.assertFalse(field.isReadOnly())
+        self.assertEqual(field.toPlainText(), "ls")
+        field.setPlainText("echo quietly")
+        run = next(
+            button
+            for button in window.chat_pane.findChildren(QPushButton)
+            if button.text() == "Выполнить" and button.isEnabled()
+        )
+        run.click()
+        thread.join(timeout=3)
+        QApplication.processEvents()
+        self.assertTrue(any(item.strip() == "echo quietly" for item in driver.sent))
+        self.assertFalse(any(item.strip() == "ls" for item in driver.sent))
+        self.assertNotIn("отредактир", box.get("result", "").lower())
+        window.close()
 
     def test_lounge_origin_shows_the_card_in_the_general_chat(self) -> None:
         from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
@@ -1691,13 +2194,9 @@ class ChatCardTests(unittest.TestCase):
                 continue
             labels = [label.text() for label in window._lounge.findChildren(QLabel)]
             saw_target = saw_target or "MCP: пульт" in labels
-            for button in window._lounge.findChildren(QPushButton):
-                if button.text() == "Отклонить" and button.isEnabled():
-                    self.assertIsNone(window.chat_pane.findChild(QFrame, "commandRequest"))
-                    button.click()
-                    clicked = True
-                    break
-            if clicked:
+            if _reject_with_reason(window._lounge):
+                self.assertIsNone(window.chat_pane.findChild(QFrame, "commandRequest"))
+                clicked = True
                 break
             time.sleep(0.02)
         thread.join(timeout=3)
@@ -1709,10 +2208,13 @@ class ChatCardTests(unittest.TestCase):
         window.close()
         self.assertTrue(saw_target)
         self.assertTrue(clicked)
-        self.assertEqual(box.get("result"), refusal())
+        self.assertEqual(box.get("result"), refusal_reason("не надо"))
         self.assertNotIn("ls", driver.sent)
         self.assertTrue(
-            any(note.startswith("отклонено\nls") and "MCP: пульт" in note for note in notes)
+            any(
+                note.startswith("отклонено с комментарием не надо\nls") and "MCP: пульт" in note
+                for note in notes
+            )
         )
 
     def test_lounge_command_accepts_a_password(self) -> None:
@@ -1782,6 +2284,80 @@ class ChatCardTests(unittest.TestCase):
         self.assertIn("ok", card.output_text())
         self.assertNotIn(info.session_id, window._lounge_runs)
         window.close()
+
+    def test_preview_stays_when_another_chat_is_opened(self) -> None:
+        from PySide6.QtWidgets import QApplication, QCheckBox, QPlainTextEdit, QPushButton
+
+        from ui.main_window import MainWindow
+
+        service, driver, profiles = _world()
+        info = _session(service, profiles)
+        other = service.create_session("вторая", "pw", llm_profile_id="m-1")
+        started = threading.Event()
+        release = threading.Event()
+        original = driver.send
+
+        def send(request) -> None:
+            if request.text.strip() == "hold":
+                started.set()
+                release.wait(3)
+            original(request)
+
+        driver.send = send
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        window.chat_pane.findChild(QCheckBox, "reviewOutput").setChecked(True)
+        box: dict = {}
+
+        def work() -> None:
+            box["result"] = service.run_mcp_command(info.session_id, "жди", "hold")
+
+        thread = threading.Thread(target=work)
+        thread.start()
+        try:
+            deadline = time.time() + 3
+            run = None
+            while time.time() < deadline and run is None:
+                QApplication.processEvents()
+                for button in window.chat_pane.findChildren(QPushButton):
+                    if button.text() == "Выполнить" and button.isVisible():
+                        run = button
+                        break
+                time.sleep(0.02)
+            self.assertIsNotNone(run)
+            run.click()
+            QApplication.processEvents()
+            self.assertTrue(started.wait(2))
+            window._activate_session(other.session_id)
+            QApplication.processEvents()
+            window._activate_session(info.session_id)
+            QApplication.processEvents()
+            field = window.chat_pane.findChild(QPlainTextEdit, "commandCapture")
+            self.assertIsNotNone(field)
+            assert field is not None
+            self.assertTrue(field.isVisible())
+            self.assertEqual(field.placeholderText(), "Команда выполняется…")
+            self.assertTrue(thread.is_alive())
+            release.set()
+            deadline = time.time() + 3
+            while time.time() < deadline and "a.txt" not in field.toPlainText():
+                QApplication.processEvents()
+                time.sleep(0.02)
+            self.assertIn("a.txt", field.toPlainText())
+            send_button = next(
+                button
+                for button in window.chat_pane.findChildren(QPushButton)
+                if button.text() == "Отправить" and button.isVisible()
+            )
+            send_button.click()
+            thread.join(3)
+            self.assertIn("a.txt", box.get("result", ""))
+        finally:
+            release.set()
+            thread.join(3)
+            window.close()
 
 
 class LoungeChatTests(unittest.TestCase):

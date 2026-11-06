@@ -72,6 +72,9 @@ class CommandAnswer:
     action: str
     reason: str = ""
     body: str = ""
+    # Если не пусто, в терминал уходит эта строка, а не исходный вызов.
+    # Модели об этом не сообщается.
+    command: str = ""
 
 
 def normalize_command(command: str) -> str:

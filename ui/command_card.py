@@ -37,6 +37,7 @@ class CommandCard(QFrame):
     input_generated = Signal(str)
     resized = Signal(int, int)
     reject_requested = Signal(str)
+    layout_changed = Signal()
 
     def __init__(
         self,
@@ -184,6 +185,8 @@ class CommandCard(QFrame):
         self._reason = QLineEdit()
         self._reason.setObjectName("commandReason")
         self._reason.setPlaceholderText("Почему отклонить")
+        self._reason.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._reason.setMinimumHeight(self._reason.fontMetrics().height() + 12)
         self._reason.returnPressed.connect(self._submit_reject)
         submit = QPushButton("Отправить отказ")
         submit.setObjectName("auxButton")
@@ -240,6 +243,36 @@ class CommandCard(QFrame):
             self.begin_live()
         self.terminal.feed(data, columns, rows, alternate)
 
+    def chrome_height(self) -> int:
+        """Высота шапки, кнопки отказа и полей. Живой экран сюда не входит."""
+        layout = self.layout()
+        if layout is None:
+            return 0
+        layout.activate()
+        margins = layout.contentsMargins()
+        chrome = margins.top() + margins.bottom()
+        spacing = max(0, layout.spacing())
+        blocks = 0
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget()
+            if widget is self.terminal:
+                continue
+            if widget is not None:
+                if not widget.isVisible():
+                    continue
+                chrome += max(widget.sizeHint().height(), widget.minimumSizeHint().height())
+                blocks += 1
+                continue
+            nested = item.layout()
+            if nested is None:
+                continue
+            chrome += nested.sizeHint().height()
+            blocks += 1
+        if blocks:
+            chrome += spacing * blocks
+        return chrome + spacing
+
     def is_fullscreen(self) -> bool:
         return self.terminal.is_fullscreen()
 
@@ -247,7 +280,7 @@ class CommandCard(QFrame):
         self.terminal.set_preferred_rows(rows)
 
     def focus_terminal(self) -> None:
-        if self._live:
+        if self._live and not self._reason_row.isVisible():
             self.terminal.setFocus()
 
     def remember_plain(self, text: str) -> None:
@@ -290,8 +323,27 @@ class CommandCard(QFrame):
             self._append_exit_line(f"[код возврата: {return_code}]", exit_fmt)
 
     def _show_reject(self) -> None:
+        self._reason.setReadOnly(False)
         self._reason_row.setVisible(True)
-        self._reason.setFocus()
+        self._reason_row.raise_()
+        self.terminal.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.terminal.clearFocus()
+        self.layout_changed.emit()
+        QTimer.singleShot(0, self._focus_reason)
+
+    def _focus_reason(self) -> None:
+        try:
+            visible = self._reason_row.isVisible()
+        except RuntimeError:
+            return
+        if not visible:
+            return
+        self._reason.setFocus(Qt.FocusReason.OtherFocusReason)
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, QScrollArea):
+            parent = parent.parentWidget()
+        if isinstance(parent, QScrollArea):
+            parent.ensureWidgetVisible(self._reason, 12, 40)
 
     def _submit_reject(self) -> None:
         reason = self._reason.text().strip()

@@ -149,7 +149,8 @@ class ApplicationService:
         self._mcp_watch: Dict[domain.SessionId, _McpWatch] = {}
         self._mcp_hidden: set = set()
         self._chat_stops: Dict[domain.SessionId, domain.ChatStop] = {}
-        self._mcp_gate = threading.Lock()
+        # Одна команда на сессию. Другие чаты из-за этого не стоят.
+        self._mcp_gates: Dict[domain.SessionId, threading.Lock] = {}
 
         self._drivers: Dict[domain.SessionId, SessionDriver] = {}
         self._sessions: Dict[domain.SessionId, domain.SessionInfo] = {}
@@ -1545,6 +1546,9 @@ class ApplicationService:
                 self._shell_labels.pop(event.session_id, None)
 
             abort_mcp = self._observe_mcp_locked(event)
+            watch = self._mcp_watch.get(event.session_id)
+            if abort_mcp and watch is not None and watch.allow_input:
+                abort_mcp = False
             hide_from_terminal = self._mark_mcp_command_locked(event)
             subscribers = list(self._subscribers)
 
@@ -1779,8 +1783,7 @@ class ApplicationService:
         origin_id: str = "",
     ) -> str:
         """Спросить подтверждение в чате-источнике и выполнить команду в терминале."""
-        with self._mcp_gate:
-            return self._run_mcp_command(session_id, intent, command, origin_id)
+        return self._run_mcp_command(session_id, intent, command, origin_id)
 
     def send_chat(self, session_id: domain.SessionId, text: str) -> None:
         """Пишет сообщение в журнал и запрашивает ответ только по переписке."""
@@ -2182,6 +2185,10 @@ class ApplicationService:
         if action == "reject_reason":
             reason = answer.reason.strip() or "причина не указана"
             return refusal_reason(reason)
+        if action in ("always", "run"):
+            replacement = normalize_command(answer.command)
+            if replacement:
+                text = replacement
         if action == "always":
             if allow is not None:
                 allow.remember(session_id, text)
@@ -2192,11 +2199,32 @@ class ApplicationService:
             return answer.body.strip() or refusal_reason("пустой вывод")
         return refusal()
 
+    def _mcp_session_lock(self, session_id: domain.SessionId) -> threading.Lock:
+        with self._lock:
+            lock = self._mcp_gates.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._mcp_gates[session_id] = lock
+            return lock
+
     def capture_mcp_output(
-        self, session_id: domain.SessionId, command: str
+        self,
+        session_id: domain.SessionId,
+        command: str,
+        interactive_ok: bool = False,
     ) -> tuple:
         """Выполнить команду. Вернуть текст для модели, сырой вывод и код."""
+        with self._mcp_session_lock(session_id):
+            return self._capture_mcp_output(session_id, command, interactive_ok)
+
+    def _capture_mcp_output(
+        self,
+        session_id: domain.SessionId,
+        command: str,
+        interactive_ok: bool = False,
+    ) -> tuple:
         watch = _McpWatch()
+        watch.allow_input = interactive_ok
         with self._lock:
             self._mcp_watch[session_id] = watch
         try:
@@ -2213,6 +2241,8 @@ class ApplicationService:
             if watch.refusal:
                 return refusal_reason(watch.refusal), output, watch.code
             if watch.interactive or watch.shell:
+                if watch.allow_input and watch.code is not None:
+                    return finished_text(watch.code, output), output, watch.code
                 if watch.shell and not watch.interactive:
                     self._exit_spawned_shell(session_id)
                 return refusal_reason(INTERACTIVE_REASON), output, watch.code
@@ -2331,13 +2361,13 @@ class ApplicationService:
                 watch.shell = True
             return False
         if event.event_type == domain.EventType.OUTPUT_CHUNK:
-            if event.alternate and not watch.interactive and not watch.ignore_shell:
-                watch.interactive = True
-                return True
             if event.persist:
                 watch.output = event.payload
             else:
                 watch.live += event.payload
+            if event.alternate and not watch.interactive and not watch.ignore_shell:
+                watch.interactive = True
+                return True
             return False
         if event.event_type == domain.EventType.COMMAND_FINISHED:
             watch.code = event.return_code
@@ -3286,6 +3316,7 @@ class _McpWatch:
         self.shell = False
         self.ignore_shell = False
         self.refusal = ""
+        self.allow_input = False
 
 
 # Сколько команд модель может выполнить за один ответ пользователю.

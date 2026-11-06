@@ -471,7 +471,7 @@ QLabel#chainRoute {{
     color: {TEXT};
     font-weight: 600;
 }}
-QPlainTextEdit#commandCapture {{
+QPlainTextEdit#commandCapture, QPlainTextEdit#commandEdit {{
     background: {ACTIVITY};
     color: {MUTED};
     border: none;
@@ -479,9 +479,12 @@ QPlainTextEdit#commandCapture {{
     padding: 6px 8px;
     font-size: 11px;
 }}
-QPlainTextEdit#commandCapture:disabled {{
+QPlainTextEdit#commandCapture:disabled, QPlainTextEdit#commandEdit:disabled {{
     background: {ACTIVITY};
     color: {MUTED};
+}}
+QPlainTextEdit#commandEdit {{
+    color: {TEXT};
 }}
 QFrame#commandCard {{
     background: {SURFACE};

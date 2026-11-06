@@ -62,6 +62,7 @@ from application.terminal_mcp import (
     call_record,
     finished_text,
     lounge_tab_id,
+    normalize_command,
 )
 from shell_takeover import looks_like_secret_prompt
 from ui.chat_pane import ChatPane
@@ -597,7 +598,11 @@ class MainWindow(QMainWindow):
         self._lounge_wait: Set[str] = set()
         self._lounge_runs: Dict[domain.SessionId, str] = {}
         self._mcp_pending: Dict[domain.SessionId, tuple] = {}
+        self._mcp_queue: Dict[str, list] = {}
+        self._mcp_hold: Set[str] = set()
+        self._mcp_order: List[str] = []
         self._reviewing: Dict[str, tuple] = {}
+        self._parked_cards: Dict[str, object] = {}
         self._review_commands: Dict[str, str] = {}
         self._hidden_terminal: Set[domain.SessionId] = set()
         self._panels: Dict[domain.SessionId, QScrollArea] = {}
@@ -621,6 +626,8 @@ class MainWindow(QMainWindow):
         self._review_done.connect(self._on_review_done)
         self.chat_pane.command_decided.connect(self._on_command_decided)
         self.chat_pane.output_decided.connect(self._on_output_decided)
+        self.chat_pane.command_input.connect(self._on_review_input)
+        self.chat_pane.command_resized.connect(self._on_review_resize)
         self._lounge.command_decided.connect(self._on_command_decided)
         self.chat_pane.rule_requested.connect(self._on_add_command_rule)
         self._lounge.rule_requested.connect(self._on_add_command_rule)
@@ -2076,13 +2083,6 @@ class MainWindow(QMainWindow):
         self.paste_button.setEnabled(enabled)
         self.paste_run_button.setEnabled(enabled)
 
-    def _viewport_rows(self, scroll: QScrollArea) -> int:
-        height = scroll.viewport().height()
-        cell = max(1, QFontMetrics(self._formats.mono).height())
-        # Шапка карточки и отступы, чтобы nano целиком помещался в ленту.
-        usable = max(cell * 8, height - cell * 3 - 24)
-        return max(8, min(60, usable // cell))
-
     def _viewport_cols(self, scroll: QScrollArea) -> int:
         width = scroll.viewport().width() - 56
         cell = max(1, QFontMetrics(self._formats.mono).horizontalAdvance("M"))
@@ -2091,24 +2091,22 @@ class MainWindow(QMainWindow):
     def _fit_live_terminal(self, card: CommandCard, scroll: QScrollArea) -> None:
         if not card.is_live():
             return
-        card.terminal.use_geometry(
-            self._viewport_cols(scroll), self._viewport_rows(scroll)
-        )
-        self._fit_card_into_view(card, scroll)
-
-    def _fit_card_into_view(self, card: CommandCard, scroll: QScrollArea) -> None:
-        """Живой экран не выше ленты, нижняя строка less остаётся на экране."""
+        cell = max(1, QFontMetrics(self._formats.mono).height())
         viewport = scroll.viewport().height()
-        layout = card.layout()
-        if layout is not None:
-            layout.activate()
-        if viewport >= 80 and card.terminal.isVisible():
-            extra = max(0, card.height() - card.terminal.height())
-            room = viewport - extra - 8
-            cell = max(1, QFontMetrics(self._formats.mono).height())
-            if room >= cell * 8:
-                rows = max(8, min(60, (room - 4) // cell))
-                card.terminal.set_preferred_rows(rows)
+        host = scroll.widget()
+        host_layout = host.layout() if host is not None else None
+        frame = 0
+        if host_layout is not None:
+            margins = host_layout.contentsMargins()
+            frame = margins.top() + margins.bottom()
+        room = viewport - card.chrome_height() - frame
+        rows = max(8, min(60, room // cell)) if room >= cell * 8 else 8
+        card.terminal.use_geometry(self._viewport_cols(scroll), rows)
+        # Кнопка отказа получает высоту только после первой раскладки.
+        room = viewport - card.chrome_height() - frame
+        if room >= cell * 8:
+            fitted = max(8, min(60, room // cell))
+            card.terminal.set_preferred_rows(fitted)
         sync_scroll_extent(scroll)
 
     def _sync_live_rows(self) -> None:
@@ -2295,6 +2293,7 @@ class MainWindow(QMainWindow):
         self._chat_drafts[session_id] = self.chat_pane.input_text()
 
     def _sync_chat(self, session_id: Optional[domain.SessionId]) -> None:
+        self._park_visible_card()
         info = self._service.get_session(session_id) if session_id else None
         if info is None:
             self.chat_pane.setVisible(False)
@@ -3041,6 +3040,9 @@ class MainWindow(QMainWindow):
                     s, reason, command
                 )
             )
+            card.layout_changed.connect(
+                lambda c=card, area=scroll: self._fit_live_terminal(c, area)
+            )
             self._live_cards[sid] = card
             self._add_history_widget(card, layout, scroll)
             card.begin_live()
@@ -3075,6 +3077,8 @@ class MainWindow(QMainWindow):
                     else self._formats.stdout
                 )
                 card.append_output(event.payload, fmt)
+            if card.is_live() and active == sid:
+                self._fit_live_terminal(card, scroll)
             if active == sid:
                 if card.is_fullscreen():
                     self._show_card_top(card, scroll)
@@ -3275,10 +3279,42 @@ class MainWindow(QMainWindow):
             if not self._lounge.has_tab(tab_id):
                 finish(CommandAnswer("reject_reason", "вкладка общего чата не найдена"))
                 return
-            self._mcp_pending[prompt.origin_id] = (prompt, finish)
-            if self._active_session_id != GENERAL_CHAT_ID:
+            self._enqueue_mcp(prompt.origin_id, prompt, finish)
+            return
+        if not info.llm_profile_id:
+            finish(CommandAnswer("reject_reason", "у активной сессии нет чата для подтверждения"))
+            return
+        self._enqueue_mcp(prompt.session_id, prompt, finish)
+
+    def _enqueue_mcp(self, key: str, prompt: CommandAsk, finish) -> None:
+        """Один видимый запрос на чат. Остальные ждут, пока его не закроют."""
+        self._remember_mcp(prompt.request_id)
+        if key in self._mcp_pending or key in self._mcp_hold:
+            self._mcp_queue.setdefault(key, []).append((prompt, finish))
+            return
+        self._mcp_pending[key] = (prompt, finish)
+        earliest = self._earliest_mcp()
+        if earliest is not None and earliest.request_id == prompt.request_id:
+            self._reveal_mcp(key, focus=True)
+
+    def _reveal_mcp(self, key: str, *, focus: bool) -> None:
+        item = self._mcp_pending.get(key)
+        if item is None:
+            return
+        prompt, finish = item
+        info = self._service.get_session(prompt.session_id)
+        if info is None:
+            self._reject_mcp_head(key, "сессия не найдена")
+            return
+        tab_id = lounge_tab_id(prompt.origin_id)
+        if tab_id:
+            if not self._lounge.has_tab(tab_id):
+                self._reject_mcp_head(key, "вкладка общего чата не найдена")
+                return
+            if focus and self._active_session_id != GENERAL_CHAT_ID:
                 self._show_general_chat(self._active_session_id)
-            self._lounge.focus_tab(tab_id)
+            if focus:
+                self._lounge.focus_tab(tab_id)
             self._lounge.show_command_request(
                 tab_id,
                 prompt.request_id,
@@ -3288,25 +3324,161 @@ class MainWindow(QMainWindow):
                 prompt.parts,
                 prompt.spans,
             )
-            self._queue_pattern_run(prompt)
+            if (
+                self._active_session_id == GENERAL_CHAT_ID
+                and self._lounge.current_tab_id() == tab_id
+            ):
+                self._queue_pattern_run(prompt)
             return
-        if not info.llm_profile_id:
-            finish(CommandAnswer("reject_reason", "у активной сессии нет чата для подтверждения"))
-            return
-        self._mcp_pending[prompt.session_id] = (prompt, finish)
-        if self._active_session_id != prompt.session_id:
+        if focus and self._active_session_id != prompt.session_id:
             state = self._service.session_state(prompt.session_id)
             if state != "closed":
                 self._activate_session(prompt.session_id)
                 return
+        if self._active_session_id == prompt.session_id:
+            self._show_pending_mcp(prompt.session_id)
+
+    def _reject_mcp_head(self, key: str, reason: str) -> None:
+        item = self._mcp_pending.pop(key, None)
+        done_id = ""
+        if item is not None:
+            done_id = item[0].request_id
+            item[1](CommandAnswer("reject_reason", reason))
+        self._advance_mcp(key, done_id)
+
+    def _advance_mcp(self, key: str, done_id: str = "") -> None:
+        if done_id:
+            self._forget_mcp(done_id)
+        if key in self._mcp_pending or key in self._mcp_hold:
+            self._open_earliest_mcp()
+            return
+        queued = self._mcp_queue.get(key) or []
+        if not queued:
+            self._mcp_queue.pop(key, None)
+            self._open_earliest_mcp()
+            return
+        self._mcp_pending[key] = queued.pop(0)
+        if not queued:
+            self._mcp_queue.pop(key, None)
+        self._open_earliest_mcp()
+
+    def _remember_mcp(self, request_id: str) -> None:
+        if request_id and request_id not in self._mcp_order:
+            self._mcp_order.append(request_id)
+
+    def _forget_mcp(self, request_id: str) -> None:
+        self._mcp_order = [item for item in self._mcp_order if item != request_id]
+
+    def _prompt_by_id(self, request_id: str) -> Optional[CommandAsk]:
+        for item in self._mcp_pending.values():
+            if item[0].request_id == request_id:
+                return item[0]
+        for queued in self._mcp_queue.values():
+            for prompt, _finish in queued:
+                if prompt.request_id == request_id:
+                    return prompt
+        found = self._reviewing.get(request_id)
+        if found is not None:
+            return found[0]
+        return None
+
+    def _mcp_is_current(self, request_id: str) -> bool:
+        if request_id in self._reviewing:
+            return True
+        return any(item[0].request_id == request_id for item in self._mcp_pending.values())
+
+    def _mcp_can_focus(self, prompt: CommandAsk) -> bool:
+        tab_id = lounge_tab_id(prompt.origin_id)
+        if tab_id:
+            return self._lounge.has_tab(tab_id)
+        return self._service.session_state(prompt.session_id) != "closed"
+
+    def _earliest_mcp(self) -> Optional[CommandAsk]:
+        """Первый ещё не закрытый запрос, который можно показать."""
+        for request_id in self._mcp_order:
+            if not self._mcp_is_current(request_id):
+                continue
+            prompt = self._prompt_by_id(request_id)
+            if prompt is None or not self._mcp_can_focus(prompt):
+                continue
+            return prompt
+        return None
+
+    def _open_earliest_mcp(self) -> None:
+        """После ответа открыть следующий запрос в порядке прихода."""
+        prompt = self._earliest_mcp()
+        if prompt is None:
+            return
+        if prompt.request_id in self._reviewing:
+            self._focus_review(prompt)
+            return
+        self._reveal_mcp(self._mcp_key(prompt), focus=True)
+
+    def _focus_review(self, prompt: CommandAsk) -> None:
+        tab_id = lounge_tab_id(prompt.origin_id)
+        if tab_id:
+            if self._active_session_id != GENERAL_CHAT_ID:
+                self._show_general_chat(self._active_session_id)
+            self._lounge.focus_tab(tab_id)
+            return
+        if self._active_session_id != prompt.session_id:
+            if self._service.session_state(prompt.session_id) != "closed":
+                self._activate_session(prompt.session_id)
+            return
         self._show_pending_mcp(prompt.session_id)
+
+    def _hide_request(self, prompt: CommandAsk) -> None:
+        parked = self._parked_cards.pop(prompt.request_id, None)
+        if parked is not None:
+            parked.hide()
+            parked.setParent(None)
+            parked.deleteLater()
+        tab_id = lounge_tab_id(prompt.origin_id)
+        if tab_id:
+            self._lounge.clear_command_request(tab_id)
+            return
+        if self._active_session_id == prompt.session_id:
+            self.chat_pane.clear_command_request()
+
+    def _park_visible_card(self) -> None:
+        card = self.chat_pane.take_command_request()
+        if card is None:
+            return
+        self._parked_cards[card.request_id()] = card
+
+    def _command_card(self, request_id: str):
+        card = self.chat_pane.command_request()
+        if card is not None and card.request_id() == request_id:
+            return card
+        return self._parked_cards.get(request_id)
+
+    def _attach_parked(self, request_id: str) -> bool:
+        card = self._parked_cards.pop(request_id, None)
+        if card is None:
+            current = self.chat_pane.command_request()
+            return current is not None and current.request_id() == request_id
+        self.chat_pane.attach_command_request(card)
+        return True
+
+    def _review_prompt(self, session_id: domain.SessionId) -> Optional[CommandAsk]:
+        for item in self._reviewing.values():
+            prompt = item[0]
+            if prompt.session_id == session_id and not lounge_tab_id(prompt.origin_id):
+                return prompt
+        return None
 
     def _show_pending_mcp(self, session_id: Optional[domain.SessionId]) -> None:
         if session_id is None or self.chat_pane.isHidden():
             return
+        review = self._review_prompt(session_id)
+        if review is not None:
+            self._attach_parked(review.request_id)
+            return
         item = self._mcp_pending.get(session_id)
         if item is None:
             self.chat_pane.clear_command_request()
+            return
+        if self._attach_parked(item[0].request_id):
             return
         prompt, _finish = item
         self.chat_pane.show_command_request(
@@ -3392,16 +3564,25 @@ class MainWindow(QMainWindow):
         self, request_id: str, action: str, reason: str, auto: bool = False
     ) -> None:
         found = None
-        for session_id, item in list(self._mcp_pending.items()):
+        pending_key = ""
+        for key, item in list(self._mcp_pending.items()):
             if item[0].request_id == request_id:
-                found = self._mcp_pending.pop(session_id)
+                found = self._mcp_pending.pop(key)
+                pending_key = key
                 break
         if found is None:
             found = self._reviewing.pop(request_id, None)
             self._review_commands.pop(request_id, None)
+            if found is not None:
+                pending_key = self._mcp_key(found[0])
+                self._mcp_hold.discard(pending_key)
         if found is None:
             return
         prompt = found[0]
+        edited = self._edited_command_text(prompt.request_id)
+        if edited:
+            prompt = replace(prompt, command=normalize_command(edited))
+            found = (prompt, found[1])
         if (
             action == "run"
             and not auto
@@ -3409,6 +3590,7 @@ class MainWindow(QMainWindow):
             and self.chat_pane.review_before_send()
         ):
             self._reviewing[request_id] = found
+            self._mcp_hold.add(pending_key)
             self._hidden_terminal.add(prompt.session_id)
             self.chat_pane.show_command_running(request_id)
             self._start_command_review(prompt)
@@ -3420,11 +3602,14 @@ class MainWindow(QMainWindow):
                 self._lounge_runs[prompt.session_id] = tab
         else:
             self._hidden_terminal.discard(prompt.session_id)
-        self.chat_pane.clear_command_request()
-        self._lounge.clear_command_request()
+        self._hide_request(prompt)
         if action not in ("run", "always"):
             self._record_tool_outcome(prompt, action, reason)
-        found[1](CommandAnswer(action, reason))
+        answer = CommandAnswer(action, reason)
+        if action in ("run", "always") and edited:
+            answer = CommandAnswer(action, reason, command=prompt.command)
+        found[1](answer)
+        self._advance_mcp(pending_key, prompt.request_id)
         if (
             prompt.session_id in self._chat_wait
             and prompt.session_id == self._active_session_id
@@ -3439,7 +3624,7 @@ class MainWindow(QMainWindow):
         def work() -> None:
             try:
                 model_text, output, code = self._service.capture_mcp_output(
-                    session_id, command
+                    session_id, command, interactive_ok=True
                 )
             except Exception as exc:
                 model_text = str(exc) or "не удалось выполнить команду"
@@ -3487,21 +3672,56 @@ class MainWindow(QMainWindow):
                 return
         elif known is not None:
             return
+        card = self._command_card(request_id)
+        if card is None:
+            return
         if event.event_type == domain.EventType.OUTPUT_CHUNK:
-            self.chat_pane.note_command_output(
-                request_id, event.payload, event.persist
-            )
+            if event.alternate:
+                card.offer_terminal(
+                    event.payload,
+                    event.columns,
+                    event.rows,
+                    True,
+                )
+            else:
+                card.note_output(event.payload, event.persist)
+                if _asks_for_secret(event.payload):
+                    card.offer_secret()
         elif event.event_type == domain.EventType.ERROR and event.payload:
-            self.chat_pane.note_command_output(
-                request_id, event.payload + "\n", False
-            )
+            card.note_output(event.payload + "\n", False)
+
+    def _on_review_input(self, request_id: str, data: str) -> None:
+        found = self._reviewing.get(request_id)
+        if found is None or not data:
+            return
+        try:
+            self._service.write_input(found[0].session_id, data)
+        except Exception:
+            return
+
+    def _on_review_resize(self, columns: int, rows: int) -> None:
+        session_id = ""
+        for item in self._reviewing.values():
+            session_id = item[0].session_id
+            break
+        if not session_id:
+            return
+        try:
+            self._service.resize(session_id, columns, rows)
+        except Exception:
+            return
 
     def _on_review_done(
         self, request_id: str, model_text: str, output: str, code: object
     ) -> None:
         if request_id not in self._reviewing:
             return
-        self.chat_pane.show_command_result(request_id, output, model_text, code)
+        card = self._command_card(request_id)
+        if card is None:
+            shown = output if str(output).strip() else model_text
+            self._on_output_decided(request_id, shown, False, model_text, code)
+            return
+        card.show_result(output, model_text, code)
 
     def _on_output_decided(
         self,
@@ -3515,10 +3735,11 @@ class MainWindow(QMainWindow):
         if found is None:
             return
         prompt = found[0]
+        pending_key = self._mcp_key(prompt)
+        self._mcp_hold.discard(pending_key)
         self._review_commands.pop(request_id, None)
         self._hidden_terminal.discard(prompt.session_id)
-        self.chat_pane.clear_command_request()
-        self._lounge.clear_command_request()
+        self._hide_request(prompt)
         if edited:
             exit_code = code if isinstance(code, int) or code is None else None
             body = (
@@ -3535,6 +3756,7 @@ class MainWindow(QMainWindow):
             shown = text if str(text).strip() else model_text
         self._record_call_note(prompt, status, shown)
         found[1](CommandAnswer("deliver", body=body))
+        self._advance_mcp(pending_key, prompt.request_id)
         if (
             prompt.session_id in self._chat_wait
             and prompt.session_id == self._active_session_id
@@ -3629,9 +3851,27 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
+    def _edited_command_text(self, request_id: str) -> str | None:
+        for pane in (self.chat_pane, self._lounge):
+            reader = getattr(pane, "edited_command", None)
+            if not callable(reader):
+                continue
+            text = reader(request_id)
+            if text is not None:
+                return text
+        return None
+
+    def _mcp_key(self, prompt: CommandAsk) -> str:
+        return prompt.origin_id if lounge_tab_id(prompt.origin_id) else prompt.session_id
+
     def _drop_mcp_pending(self, reason: str) -> None:
         pending = list(self._mcp_pending.values())
+        for queued in self._mcp_queue.values():
+            pending.extend(queued)
         self._mcp_pending.clear()
+        self._mcp_queue.clear()
+        self._mcp_hold.clear()
+        self._mcp_order.clear()
         self.chat_pane.clear_command_request()
         self._lounge.clear_command_request()
         for prompt, finish in pending:
@@ -3639,13 +3879,20 @@ class MainWindow(QMainWindow):
             finish(CommandAnswer("reject_reason", reason))
 
     def _drop_session_mcp(self, session_id: str, reason: str) -> None:
+        pending = []
         item = self._mcp_pending.pop(session_id, None)
-        if item is None:
+        if item is not None:
+            pending.append(item)
+        pending.extend(self._mcp_queue.pop(session_id, []))
+        self._mcp_hold.discard(session_id)
+        if not pending:
             return
-        prompt, finish = item
         self.chat_pane.clear_command_request()
-        self._record_tool_outcome(prompt, "reject_reason", reason)
-        finish(CommandAnswer("reject_reason", reason))
+        for prompt, finish in pending:
+            self._forget_mcp(prompt.request_id)
+            self._record_tool_outcome(prompt, "reject_reason", reason)
+            finish(CommandAnswer("reject_reason", reason))
+        self._open_earliest_mcp()
         
     def _on_tab_complete(self) -> None:
         sid = self._active_session_id

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from application.terminal_mcp import parse_call
 from ui.command_input import five_line_height, one_line_height
 from ui.fitted_text import FittedText, clamp_scroll_host
+from ui.terminal_view import TerminalView
 
 _FENCE = re.compile(r"```([^\n`]*)\r?\n(.*?)```", re.DOTALL)
 _SHELL_LANGS = frozenset(
@@ -369,6 +370,35 @@ def command_rich_text(
     return "Команда:<br>" + body
 
 
+class _CaptureEdit(QPlainTextEdit):
+    """Поле вывода. Колесо крутит только его, в том числе у верхней границы."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.viewport().installEventFilter(self)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        self._scroll_wheel(event)
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
+            self._scroll_wheel(event)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _scroll_wheel(self, event) -> None:
+        bar = self.verticalScrollBar()
+        delta = event.angleDelta().y()
+        pixels = event.pixelDelta().y()
+        if bar.maximum() > bar.minimum():
+            if delta:
+                steps = delta / 120.0
+                bar.setValue(int(bar.value() - steps * max(bar.singleStep(), 20) * 3))
+            elif pixels:
+                bar.setValue(bar.value() - pixels)
+        event.accept()
+
+
 class _CommandText(QTextEdit):
     """Текст команды. Совпавшая с шаблоном часть зелёная, операторы — обычные."""
 
@@ -464,6 +494,9 @@ class _CommandRequest(QFrame):
     decided = Signal(str, str, str)
     rule_requested = Signal(str)
     output_decided = Signal(str, str, bool, str, object)
+    stdin_submitted = Signal(str)
+    input_generated = Signal(str)
+    resized = Signal(int, int)
 
     def __init__(
         self,
@@ -485,8 +518,20 @@ class _CommandRequest(QFrame):
         layout.setSpacing(8)
         title = QLabel("Запрос на выполнение команды")
         title.setObjectName("requestTitle")
+        title.setWordWrap(True)
         self._title = title
-        layout.addWidget(title)
+        add_rule = QPushButton("Добавить правило")
+        add_rule.setObjectName("auxButton")
+        add_rule.setToolTip(
+            "Открыть шаблон для ОС этого подключения.\n"
+            "Команда при этом не выполняется."
+        )
+        add_rule.clicked.connect(lambda: self.rule_requested.emit(self._request_id))
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(title, 1)
+        head.addWidget(add_rule, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(head)
         if target:
             where = QLabel(f"MCP: {target}")
             where.setObjectName("commandTarget")
@@ -508,17 +553,11 @@ class _CommandRequest(QFrame):
         run.setObjectName("auxButton")
         run.setToolTip("Выполнить команду один раз")
         run.clicked.connect(lambda: self._choose("run", ""))
-        add_rule = QPushButton("Добавить правило")
-        add_rule.setObjectName("auxButton")
-        add_rule.setToolTip(
-            "Открыть шаблон для ОС этого подключения.\n"
-            "Команда при этом не выполняется."
-        )
-        add_rule.clicked.connect(lambda: self.rule_requested.emit(self._request_id))
-        reject = QPushButton("Отклонить")
-        reject.setObjectName("auxButton")
-        reject.setToolTip("Отказать без пояснения")
-        reject.clicked.connect(lambda: self._choose("reject", ""))
+        edit = QPushButton("Отредактировать перед выполнением")
+        edit.setObjectName("auxButton")
+        edit.setToolTip("Изменить текст команды. Модель об этом не узнает.")
+        edit.clicked.connect(self._edit_command)
+        self._edit_button = edit
         explain = QPushButton("Отклонить по причине")
         explain.setObjectName("auxButton")
         explain.setToolTip("Отказать и передать модели причину")
@@ -527,33 +566,17 @@ class _CommandRequest(QFrame):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(run)
-        row.addWidget(add_rule)
+        row.addWidget(edit)
         row.addStretch(1)
         layout.addLayout(row)
         second = QHBoxLayout()
         second.setSpacing(8)
-        second.addWidget(reject)
         second.addWidget(explain)
         second.addStretch(1)
         layout.addLayout(second)
 
-        self._reason_row = QWidget()
-        reason_layout = QHBoxLayout(self._reason_row)
-        reason_layout.setContentsMargins(0, 0, 0, 0)
-        reason_layout.setSpacing(8)
-        self._reason = QLineEdit()
-        self._reason.setObjectName("commandReason")
-        self._reason.setPlaceholderText("Почему команда отклонена")
-        self._reason.returnPressed.connect(self._submit_reason)
-        submit = QPushButton("Отправить отказ")
-        submit.setObjectName("auxButton")
-        submit.clicked.connect(self._submit_reason)
-        reason_layout.addWidget(self._reason, 1)
-        reason_layout.addWidget(submit)
-        self._reason_row.setVisible(False)
-        layout.addWidget(self._reason_row)
-
-        self._output = QPlainTextEdit()
+        self._command_edit: QPlainTextEdit | None = None
+        self._output = _CaptureEdit()
         self._output.setObjectName("commandCapture")
         self._output.setFont(mono)
         self._output.setReadOnly(True)
@@ -563,6 +586,20 @@ class _CommandRequest(QFrame):
         self._output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._output.setVisible(False)
         layout.addWidget(self._output)
+        self._stdin = QLineEdit()
+        self._stdin.setObjectName("commandStdin")
+        self._stdin.setFont(mono)
+        self._stdin.setPlaceholderText("Ввод в терминал")
+        self._stdin.setVisible(False)
+        self._stdin.returnPressed.connect(self._submit_stdin)
+        layout.addWidget(self._stdin)
+        self._screen = TerminalView(mono)
+        self._screen.setObjectName("commandScreen")
+        self._screen.setVisible(False)
+        self._screen.input_generated.connect(self.input_generated.emit)
+        self._screen.resized.connect(self.resized.emit)
+        layout.addWidget(self._screen)
+        self._secret = False
         self._captured = ""
         self._model_text = ""
         self._exit_code: object = None
@@ -592,12 +629,59 @@ class _CommandRequest(QFrame):
         self._review_row.setLayout(review)
         self._review_row.setVisible(False)
         layout.addWidget(self._review_row)
-        self._approval = (run, add_rule, reject, explain)
+
+        self._reason_row = QWidget()
+        reason_layout = QHBoxLayout(self._reason_row)
+        reason_layout.setContentsMargins(0, 0, 0, 0)
+        reason_layout.setSpacing(8)
+        self._reason = QLineEdit()
+        self._reason.setObjectName("commandReason")
+        self._reason.setPlaceholderText("Почему команда отклонена")
+        self._reason.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._reason.setMinimumHeight(self._reason.fontMetrics().height() + 12)
+        self._reason.returnPressed.connect(self._submit_reason)
+        submit = QPushButton("Отправить отказ")
+        submit.setObjectName("auxButton")
+        submit.clicked.connect(self._submit_reason)
+        reason_layout.addWidget(self._reason, 1)
+        reason_layout.addWidget(submit)
+        self._reason_row.setVisible(False)
+        layout.addWidget(self._reason_row)
+        self._approval = (run, edit, add_rule, explain)
         self._review_buttons = (send, redact, review_reject, submit)
         self._buttons = self._approval + (submit,)
 
     def request_id(self) -> str:
         return self._request_id
+
+    def command_to_run(self) -> str | None:
+        """Текст из поля правки. None, пока команду не открыли на редактирование."""
+        box = self._command_edit
+        if box is None or box.isHidden():
+            return None
+        return box.toPlainText()
+
+    def _edit_command(self) -> None:
+        if self._command_edit is None:
+            box = _CaptureEdit()
+            box.setObjectName("commandEdit")
+            box.setFont(self._mono)
+            box.setPlainText(self._command)
+            box.setMinimumHeight(72)
+            box.setMaximumHeight(280)
+            box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            layout = self.layout()
+            index = layout.indexOf(self._code)
+            if index < 0:
+                layout.addWidget(box)
+            else:
+                layout.insertWidget(index, box)
+            self._command_edit = box
+        self._code.hide()
+        self._command_edit.show()
+        self._command_edit.setReadOnly(False)
+        self._command_edit.setFocus()
+        self._edit_button.hide()
 
     def set_preview(self, parts: Tuple[str, ...], spans: Sequence[Sequence[object]]) -> None:
         """Перерисовать команды после нового шаблона."""
@@ -622,8 +706,24 @@ class _CommandRequest(QFrame):
         return _CommandText(self._mono, parts, spans)
 
     def _show_reason(self) -> None:
+        self._reason.setReadOnly(False)
         self._reason_row.setVisible(True)
-        self._reason.setFocus()
+        self._reason_row.raise_()
+        QTimer.singleShot(0, self._focus_reason)
+
+    def _focus_reason(self) -> None:
+        try:
+            visible = self._reason_row.isVisible()
+        except RuntimeError:
+            return
+        if not visible:
+            return
+        self._reason.setFocus(Qt.FocusReason.OtherFocusReason)
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, QScrollArea):
+            parent = parent.parentWidget()
+        if isinstance(parent, QScrollArea):
+            parent.ensureWidgetVisible(self._reason, 12, 40)
 
     def _submit_reason(self) -> None:
         text = self._reason.text().strip()
@@ -638,8 +738,16 @@ class _CommandRequest(QFrame):
             button.hide()
         self._output.setVisible(True)
         self._output.setReadOnly(True)
+        self._output.setPlaceholderText("Команда выполняется…")
         self._output.setPlainText("")
         self._review_row.setVisible(False)
+        self._stdin.setVisible(True)
+        self._stdin.clear()
+        self._stdin.setReadOnly(False)
+        self._stdin.setEchoMode(QLineEdit.EchoMode.Normal)
+        self._stdin.setPlaceholderText("Ввод в терминал")
+        self._secret = False
+        self._screen.setVisible(False)
         self._editable = False
         self._settled = False
         self._live = ""
@@ -656,6 +764,39 @@ class _CommandRequest(QFrame):
         cursor.movePosition(cursor.MoveOperation.End)
         self._output.setTextCursor(cursor)
 
+    def offer_secret(self) -> None:
+        """Пароль sudo и похожие запросы. Символы не попадают в текст для модели."""
+        if self._settled or self._secret:
+            return
+        self._secret = True
+        self._stdin.setVisible(True)
+        self._stdin.setEchoMode(QLineEdit.EchoMode.Password)
+        self._stdin.setPlaceholderText("Пароль")
+        self._stdin.setFocus()
+
+    def offer_terminal(
+        self,
+        data: str,
+        columns: Optional[int],
+        rows: Optional[int],
+        alternate: bool,
+    ) -> None:
+        """Полноэкранный ввод: клавиши уходят в ту же сессию."""
+        if self._settled:
+            return
+        if not self._screen.isVisible():
+            self._screen.setVisible(True)
+            self._screen.set_interactive(True)
+            self._stdin.setVisible(False)
+        self._screen.feed(data, columns, rows, alternate)
+        if not self._screen.hasFocus():
+            self._screen.setFocus()
+
+    def _submit_stdin(self) -> None:
+        text = self._stdin.text()
+        self._stdin.clear()
+        self.stdin_submitted.emit(text + "\n")
+
     def show_result(self, output: str, model_text: str, code: object) -> None:
         self._settled = True
         self._model_text = model_text
@@ -671,6 +812,9 @@ class _CommandRequest(QFrame):
         self.style().polish(self)
         if not self._editable:
             self._output.setReadOnly(True)
+        self._stdin.setVisible(False)
+        self._screen.set_interactive(False)
+        self._screen.setVisible(False)
         self._review_row.setVisible(True)
         for button in self._review_buttons:
             button.setEnabled(True)
@@ -693,6 +837,12 @@ class _CommandRequest(QFrame):
         )
 
     def _choose(self, action: str, reason: str) -> None:
+        if action == "run":
+            edited = self.command_to_run()
+            if edited is not None and not edited.strip():
+                if self._command_edit is not None:
+                    self._command_edit.setFocus()
+                return
         for button in self._buttons + self._review_buttons:
             button.setEnabled(False)
         self._output.setReadOnly(True)
@@ -711,6 +861,8 @@ class ChatPane(QWidget):
     clear_requested = Signal()
     command_decided = Signal(str, str, str)
     output_decided = Signal(str, str, bool, str, object)
+    command_input = Signal(str, str)
+    command_resized = Signal(int, int)
     rule_requested = Signal(str)
     limit_changed = Signal(int)
     model_requested = Signal(str)
@@ -1150,6 +1302,13 @@ class ChatPane(QWidget):
         card.decided.connect(self.command_decided.emit)
         card.output_decided.connect(self.output_decided.emit)
         card.rule_requested.connect(self.rule_requested.emit)
+        card.stdin_submitted.connect(
+            lambda data, rid=request_id: self.command_input.emit(rid, data)
+        )
+        card.input_generated.connect(
+            lambda data, rid=request_id: self.command_input.emit(rid, data)
+        )
+        card.resized.connect(self.command_resized.emit)
         self._request_card = card
         self._messages.insertWidget(self._messages.count() - 1, card)
         self.set_thinking(False)
@@ -1173,6 +1332,25 @@ class ChatPane(QWidget):
         card.show_running()
         self._scroll_bottom()
 
+    def offer_command_secret(self, request_id: str) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.offer_secret()
+
+    def feed_command_screen(
+        self,
+        request_id: str,
+        data: str,
+        columns: Optional[int],
+        rows: Optional[int],
+        alternate: bool,
+    ) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.offer_terminal(data, columns, rows, alternate)
+
     def note_command_output(self, request_id: str, text: str, replace: bool) -> None:
         card = self._request_card
         if card is None or card.request_id() != request_id:
@@ -1189,12 +1367,47 @@ class ChatPane(QWidget):
         card.show_result(output, model_text, code)
         self._scroll_bottom()
 
+    def edited_command(self, request_id: str) -> str | None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return None
+        return card.command_to_run()
+
+    def command_request(self):
+        return self._request_card
+
+    def take_command_request(self):
+        """Снять карточку с ленты, не уничтожая её. Чат можно переключить."""
+        card = self._request_card
+        if card is None:
+            return None
+        self._request_card = None
+        self._messages.removeWidget(card)
+        card.hide()
+        card.setParent(None)
+        return card
+
+    def attach_command_request(self, card) -> None:
+        current = self._request_card
+        if current is card:
+            card.show()
+            self._scroll_bottom()
+            return
+        if current is not None:
+            self.clear_command_request()
+        self._request_card = card
+        self._messages.insertWidget(self._messages.count() - 1, card)
+        card.show()
+        self._scroll_bottom()
+
     def clear_command_request(self) -> None:
         card = self._request_card
         self._request_card = None
         if card is None:
             return
         self._messages.removeWidget(card)
+        card.hide()
+        card.setParent(None)
         card.deleteLater()
 
     def set_problem(self, text: str, title: str = "") -> None:

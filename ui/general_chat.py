@@ -529,22 +529,24 @@ class GeneralChatPage(QWidget):
         if height < 80:
             return
         cell = max(1, QFontMetrics(self._mono).height())
-        usable = max(cell * 8, height - cell * 3 - 24)
-        rows = max(8, min(60, usable // cell))
         width = max(80, scroll.viewport().width() - 56)
         cols = max(20, min(400, width // max(1, QFontMetrics(self._mono).horizontalAdvance("M"))))
+        host = scroll.widget()
+        host_layout = host.layout() if host is not None else None
+        frame = 0
+        if host_layout is not None:
+            margins = host_layout.contentsMargins()
+            frame = margins.top() + margins.bottom()
         tab = self._tabs[self._current]
         for _index, card in tab.cards:
             if not card.is_live():
                 continue
+            room = height - card.chrome_height() - frame
+            rows = max(8, min(60, room // cell)) if room >= cell * 8 else 8
             card.terminal.use_geometry(cols, rows)
-            layout = card.layout()
-            if layout is not None:
-                layout.activate()
-            extra = max(0, card.height() - card.terminal.height())
-            room = height - extra - 8
+            room = height - card.chrome_height() - frame
             if card.terminal.isVisible() and room >= cell * 8:
-                fitted = max(8, min(60, (room - 4) // cell))
+                fitted = max(8, min(60, room // cell))
                 card.terminal.set_preferred_rows(fitted)
 
     def _render_messages(self) -> None:
@@ -654,6 +656,12 @@ class GeneralChatPage(QWidget):
         self._fit_transcript()
         QTimer.singleShot(0, self._fit_transcript)
         self._scroll_bottom()
+
+    def edited_command(self, request_id: str) -> str | None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return None
+        return card.command_to_run()
 
     def update_command_preview(
         self,
