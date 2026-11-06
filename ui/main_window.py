@@ -66,7 +66,7 @@ from application.terminal_mcp import (
 )
 from shell_takeover import looks_like_secret_prompt
 from ui.chat_pane import ChatPane
-from ui.command_input import CommandInput, command_needs_more
+from ui.command_input import CommandInput
 from ui.command_card import CommandCard
 from ui.fitted_text import clamp_scroll_host, sync_scroll_extent
 from ui.dialogs import (
@@ -627,6 +627,7 @@ class MainWindow(QMainWindow):
         self.chat_pane.command_decided.connect(self._on_command_decided)
         self.chat_pane.output_decided.connect(self._on_output_decided)
         self.chat_pane.command_input.connect(self._on_review_input)
+        self.chat_pane.command_interrupt.connect(self._on_review_interrupt)
         self.chat_pane.command_resized.connect(self._on_review_resize)
         self._lounge.command_decided.connect(self._on_command_decided)
         self.chat_pane.rule_requested.connect(self._on_add_command_rule)
@@ -2176,13 +2177,16 @@ class MainWindow(QMainWindow):
                     if event.modifiers() & (
                         Qt.KeyboardModifier.ShiftModifier
                         | Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.AltModifier
                     ):
                         self.input.insertPlainText("\n")
                         return True
                     self._accept_current_completion()
                     return True
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and event.modifiers() & (
-                Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier
             ):
                 self.input.insertPlainText("\n")
                 return True
@@ -2195,18 +2199,7 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key.Key_Tab:
                 self._on_tab_complete()
                 return True
-            modifiers = event.modifiers()
-            plain_enter = not (
-                modifiers
-                & (
-                    Qt.KeyboardModifier.ShiftModifier
-                    | Qt.KeyboardModifier.ControlModifier
-                    | Qt.KeyboardModifier.AltModifier
-                )
-            )
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and plain_enter:
-                if command_needs_more(self.input.text()):
-                    return False
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._on_submit()
                 return True
         return super().eventFilter(obj, event)
@@ -3689,6 +3682,15 @@ class MainWindow(QMainWindow):
                     card.offer_secret()
         elif event.event_type == domain.EventType.ERROR and event.payload:
             card.note_output(event.payload + "\n", False)
+
+    def _on_review_interrupt(self, request_id: str) -> None:
+        found = self._reviewing.get(request_id)
+        if found is None:
+            return
+        try:
+            self._service.cancel_command(found[0].session_id)
+        except Exception:
+            return
 
     def _on_review_input(self, request_id: str, data: str) -> None:
         found = self._reviewing.get(request_id)

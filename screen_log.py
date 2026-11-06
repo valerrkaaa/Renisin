@@ -120,12 +120,15 @@ class ScreenLog:
         self._screen = PrimaryScreen(columns, lines)
         self._stream = pyte.Stream(self._screen)
         self._lock = threading.Lock()
+        self._held = ""
 
     def feed(self, data: str) -> None:
-        if not data:
+        if not data and not self._held:
             return
         with self._lock:
-            self._stream.feed(data)
+            clean, self._held = split_pending_osc(self._held + data)
+            if clean:
+                self._stream.feed(clean)
 
     def resize(self, columns: int, lines: int) -> None:
         columns = max(2, columns)
@@ -161,6 +164,80 @@ class ScreenLog:
     @property
     def lines(self) -> int:
         return self._screen.lines
+
+
+def split_pending_osc(text: str) -> tuple:
+    """Убирает OSC (заголовок окна conhost и похожие).
+
+    Незакрытая последовательность в конце остаётся хвостом: следующий кусок
+    её допишет. ESC посреди заголовка начинает уже другую команду, иначе
+    pyte считает весь дальнейший вывод частью заголовка и теряет его.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "\x1b" or (i + 1 < n and text[i + 1] != "]"):
+            if text[i] == "\x1b" and i + 1 >= n:
+                return "".join(out), text[i:]
+            out.append(text[i])
+            i += 1
+            continue
+        j = i + 2
+        closed = False
+        while j < n:
+            if text[j] == "\x07":
+                i = j + 1
+                closed = True
+                break
+            if text[j] == "\x1b" and j + 1 < n and text[j + 1] == "\\":
+                i = j + 2
+                closed = True
+                break
+            if text[j] == "\x1b":
+                i = j
+                closed = True
+                break
+            j += 1
+        if not closed:
+            return "".join(out), text[i:]
+    return "".join(out), ""
+
+
+def plain_terminal_text(text: str) -> str:
+    """Текст без OSC, CSI и прочих ESC-команд. Переводы строк остаются."""
+    if "\x1b" not in text and "\x9b" not in text:
+        return text.replace("\r", "")
+    source, _pending = split_pending_osc(text)
+    out: List[str] = []
+    i = 0
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        if ch == "\x1b":
+            if i + 1 >= n:
+                break
+            nxt = source[i + 1]
+            if nxt == "[":
+                i += 2
+                while i < n and not ("@" <= source[i] <= "~"):
+                    i += 1
+                i = min(n, i + 1)
+                continue
+            i += 2
+            continue
+        if ch == "\x9b":
+            i += 1
+            while i < n and not ("@" <= source[i] <= "~"):
+                i += 1
+            i = min(n, i + 1)
+            continue
+        if ch < " " and ch not in "\n\t":
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _is_wide(ch: str) -> bool:

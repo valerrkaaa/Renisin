@@ -314,6 +314,8 @@ class SessionConfig:
     identity_key_path: Optional[str] = None
     # Passphrase ключа из настроек. Не сохраняется: это мастер-пароль запуска.
     identity_passphrase: Optional[str] = None
+    # Подсказка, если при входе не удалось опросить удалённую оболочку.
+    shell_family: str = SHELL_UNIX
 
 
 @dataclass(frozen=True)

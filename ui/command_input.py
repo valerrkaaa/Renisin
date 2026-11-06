@@ -3,8 +3,8 @@
 
 """Многострочное поле команды.
 
-Enter отправляет законченную команду. Пока открыты heredoc, кавычки
-или перенос через \\, Enter добавляет строку. Сам процесс не запускает.
+Enter отправляет команду. Ctrl+Enter, Shift+Enter и Alt+Enter
+добавляют строку. Само поле процесс не запускает.
 """
 from __future__ import annotations
 
@@ -164,10 +164,13 @@ class CommandInput(QPlainTextEdit):
         self.setTextCursor(cursor)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and event.modifiers() & (
-            Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
-        ):
-            self.insertPlainText("\n")
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & (
+                Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier
+            ):
+                self.insertPlainText("\n")
             return
         super().keyPressEvent(event)
 

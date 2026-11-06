@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from application.terminal_mcp import parse_call
+from screen_log import plain_terminal_text
 from ui.command_input import five_line_height, one_line_height
 from ui.fitted_text import FittedText, clamp_scroll_host
 from ui.terminal_view import TerminalView
@@ -496,6 +497,7 @@ class _CommandRequest(QFrame):
     output_decided = Signal(str, str, bool, str, object)
     stdin_submitted = Signal(str)
     input_generated = Signal(str)
+    interrupt_requested = Signal(str)
     resized = Signal(int, int)
 
     def __init__(
@@ -589,10 +591,23 @@ class _CommandRequest(QFrame):
         self._stdin = QLineEdit()
         self._stdin.setObjectName("commandStdin")
         self._stdin.setFont(mono)
-        self._stdin.setPlaceholderText("Ввод в терминал")
+        self._stdin.setPlaceholderText("Ввод в программу, затем Enter")
+        self._stdin.setToolTip(
+            "Сюда попадает то, что ждёт программа.\n"
+            "q и Enter закрывают more. Кнопка «Прервать» останавливает её."
+        )
         self._stdin.setVisible(False)
         self._stdin.returnPressed.connect(self._submit_stdin)
-        layout.addWidget(self._stdin)
+        self._stop = QPushButton("Прервать")
+        self._stop.setObjectName("auxButton")
+        self._stop.setToolTip("Остановить программу, которая ждёт ввод")
+        self._stop.setVisible(False)
+        self._stop.clicked.connect(self._interrupt)
+        typing = QHBoxLayout()
+        typing.setSpacing(8)
+        typing.addWidget(self._stdin, 1)
+        typing.addWidget(self._stop)
+        layout.addLayout(typing)
         self._screen = TerminalView(mono)
         self._screen.setObjectName("commandScreen")
         self._screen.setVisible(False)
@@ -605,6 +620,8 @@ class _CommandRequest(QFrame):
         self._exit_code: object = None
         self._editable = False
         self._settled = False
+        self._prompted = False
+        self._raw = ""
         self._live = ""
 
         review = QHBoxLayout()
@@ -682,6 +699,7 @@ class _CommandRequest(QFrame):
         self._command_edit.setReadOnly(False)
         self._command_edit.setFocus()
         self._edit_button.hide()
+        self._reveal_in_chat()
 
     def set_preview(self, parts: Tuple[str, ...], spans: Sequence[Sequence[object]]) -> None:
         """Перерисовать команды после нового шаблона."""
@@ -719,11 +737,7 @@ class _CommandRequest(QFrame):
         if not visible:
             return
         self._reason.setFocus(Qt.FocusReason.OtherFocusReason)
-        parent = self.parentWidget()
-        while parent is not None and not isinstance(parent, QScrollArea):
-            parent = parent.parentWidget()
-        if isinstance(parent, QScrollArea):
-            parent.ensureWidgetVisible(self._reason, 12, 40)
+        self._reveal_in_chat()
 
     def _submit_reason(self) -> None:
         text = self._reason.text().strip()
@@ -745,24 +759,33 @@ class _CommandRequest(QFrame):
         self._stdin.clear()
         self._stdin.setReadOnly(False)
         self._stdin.setEchoMode(QLineEdit.EchoMode.Normal)
-        self._stdin.setPlaceholderText("Ввод в терминал")
+        self._stdin.setPlaceholderText("Ввод в программу, затем Enter")
+        self._stop.setVisible(True)
         self._secret = False
+        self._prompted = False
+        QTimer.singleShot(0, self._focus_stdin)
         self._screen.setVisible(False)
         self._editable = False
         self._settled = False
+        self._raw = ""
         self._live = ""
 
     def note_output(self, text: str, replace: bool) -> None:
         if self._editable or self._settled:
             return
         if replace:
-            self._live = text
+            self._raw = text
         else:
-            self._live += text
+            self._raw += text
+        self._live = plain_terminal_text(self._raw)
         self._output.setPlainText(self._live)
         cursor = self._output.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self._output.setTextCursor(cursor)
+        if not self._prompted and _pager_waiting(self._live):
+            self._prompted = True
+            self._stdin.setPlaceholderText("q и Enter закрывают more")
+            self._focus_stdin()
 
     def offer_secret(self) -> None:
         """Пароль sudo и похожие запросы. Символы не попадают в текст для модели."""
@@ -773,6 +796,7 @@ class _CommandRequest(QFrame):
         self._stdin.setEchoMode(QLineEdit.EchoMode.Password)
         self._stdin.setPlaceholderText("Пароль")
         self._stdin.setFocus()
+        self._reveal_in_chat()
 
     def offer_terminal(
         self,
@@ -788,9 +812,28 @@ class _CommandRequest(QFrame):
             self._screen.setVisible(True)
             self._screen.set_interactive(True)
             self._stdin.setVisible(False)
+            self._reveal_in_chat()
         self._screen.feed(data, columns, rows, alternate)
         if not self._screen.hasFocus():
             self._screen.setFocus()
+
+    def _reveal_in_chat(self) -> None:
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, ChatPane):
+            parent = parent.parentWidget()
+        if isinstance(parent, ChatPane):
+            parent.reveal_command_request()
+
+    def _focus_stdin(self) -> None:
+        try:
+            visible = self._stdin.isVisible()
+        except RuntimeError:
+            return
+        if visible and not self._secret:
+            self._stdin.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _interrupt(self) -> None:
+        self.interrupt_requested.emit(self._request_id)
 
     def _submit_stdin(self) -> None:
         text = self._stdin.text()
@@ -801,8 +844,9 @@ class _CommandRequest(QFrame):
         self._settled = True
         self._model_text = model_text
         self._exit_code = code
-        shown = output if output.strip() else model_text
+        shown = plain_terminal_text(output if output.strip() else model_text)
         self._captured = shown
+        self._raw = shown
         if not self._editable:
             self._output.setPlainText(shown)
         self._output.setVisible(True)
@@ -813,6 +857,7 @@ class _CommandRequest(QFrame):
         if not self._editable:
             self._output.setReadOnly(True)
         self._stdin.setVisible(False)
+        self._stop.setVisible(False)
         self._screen.set_interactive(False)
         self._screen.setVisible(False)
         self._review_row.setVisible(True)
@@ -850,6 +895,11 @@ class _CommandRequest(QFrame):
         self.decided.emit(self._request_id, action, reason)
 
 
+def _pager_waiting(text: str) -> bool:
+    folded = text.replace("\r", "").lower()
+    return "-- more --" in folded or "--more--" in folded
+
+
 class ChatPane(QWidget):
     send_requested = Signal()
     stop_requested = Signal()
@@ -862,6 +912,7 @@ class ChatPane(QWidget):
     command_decided = Signal(str, str, str)
     output_decided = Signal(str, str, bool, str, object)
     command_input = Signal(str, str)
+    command_interrupt = Signal(str)
     command_resized = Signal(int, int)
     rule_requested = Signal(str)
     limit_changed = Signal(int)
@@ -1305,6 +1356,7 @@ class ChatPane(QWidget):
         card.stdin_submitted.connect(
             lambda data, rid=request_id: self.command_input.emit(rid, data)
         )
+        card.interrupt_requested.connect(self.command_interrupt.emit)
         card.input_generated.connect(
             lambda data, rid=request_id: self.command_input.emit(rid, data)
         )
@@ -1312,7 +1364,7 @@ class ChatPane(QWidget):
         self._request_card = card
         self._messages.insertWidget(self._messages.count() - 1, card)
         self.set_thinking(False)
-        self._scroll_bottom()
+        self.reveal_command_request()
 
     def update_command_preview(
         self,
@@ -1330,7 +1382,7 @@ class ChatPane(QWidget):
         if card is None or card.request_id() != request_id:
             return
         card.show_running()
-        self._scroll_bottom()
+        self.reveal_command_request()
 
     def offer_command_secret(self, request_id: str) -> None:
         card = self._request_card
@@ -1356,7 +1408,6 @@ class ChatPane(QWidget):
         if card is None or card.request_id() != request_id:
             return
         card.note_output(text, replace)
-        self._scroll_bottom()
 
     def show_command_result(
         self, request_id: str, output: str, model_text: str, code: object
@@ -1365,7 +1416,7 @@ class ChatPane(QWidget):
         if card is None or card.request_id() != request_id:
             return
         card.show_result(output, model_text, code)
-        self._scroll_bottom()
+        self.reveal_command_request()
 
     def edited_command(self, request_id: str) -> str | None:
         card = self._request_card
@@ -1391,14 +1442,14 @@ class ChatPane(QWidget):
         current = self._request_card
         if current is card:
             card.show()
-            self._scroll_bottom()
+            self.reveal_command_request()
             return
         if current is not None:
             self.clear_command_request()
         self._request_card = card
         self._messages.insertWidget(self._messages.count() - 1, card)
         card.show()
-        self._scroll_bottom()
+        self.reveal_command_request()
 
     def clear_command_request(self) -> None:
         card = self._request_card
@@ -1692,6 +1743,25 @@ class ChatPane(QWidget):
             index = thinking_index
         self._messages.insertWidget(index, widget)
         QTimer.singleShot(0, self._fit_bubbles)
+
+    def reveal_command_request(self) -> None:
+        """Держит верх блока запроса в поле зрения. Низ чата прячет сам блок."""
+        card = self._request_card
+
+        def go(repeat: bool = True) -> None:
+            try:
+                if card is None or card.isHidden():
+                    return
+                self._messages.activate()
+                top = max(0, card.y() - 4)
+                bar = self._scroll.verticalScrollBar()
+                bar.setValue(min(bar.maximum(), top))
+            except RuntimeError:
+                return
+            if repeat:
+                QTimer.singleShot(0, lambda: go(False))
+
+        QTimer.singleShot(0, go)
 
     def _scroll_bottom(self) -> None:
         """В самый низ. Второй проход ловит высоту, которая появляется после раскладки."""

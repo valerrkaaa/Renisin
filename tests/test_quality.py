@@ -246,6 +246,19 @@ class ScreenLogTests(unittest.TestCase):
         self.assertIn("world", text)
         self.assertNotIn("nano", text)
 
+    def test_conhost_title_does_not_eat_the_output(self) -> None:
+        from screen_log import plain_terminal_text
+
+        screen = ScreenLog(40, 6)
+        raw = "\x1b[H\x1b]0;C:\\WINDOWS\\system32\\conhost.exe \x1b[?25hREADME\r\n"
+        screen.feed(raw)
+        text = screen.primary_text()
+        self.assertIn("README", text)
+        self.assertNotIn("conhost.exe", text)
+        shown = plain_terminal_text(raw)
+        self.assertEqual(shown, "README\n")
+        self.assertNotIn("\x1b", shown)
+
 
 class PromptUiTests(unittest.TestCase):
     @classmethod
@@ -575,9 +588,16 @@ class MultilineAndSelectionTests(unittest.TestCase):
         window = MainWindow(service)
         window._activate_session("a")
         window.input.setText("cat <<EOF\n192.168.1.10 control-plane")
-        QTest.keyClick(window.input, Qt.Key.Key_Return)
+        QTest.keyClick(
+            window.input, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier
+        )
         self.assertEqual(service.sent, [])
         self.assertTrue(window.input.text().endswith("\n"))
+        QTest.keyClick(window.input, Qt.Key.Key_Return)
+        self.assertEqual(
+            service.sent, ["cat <<EOF\n192.168.1.10 control-plane\n"]
+        )
+        service.sent.clear()
         finished = "cat <<EOF | sudo tee -a /etc/hosts\n192.168.1.10 control-plane\nEOF"
         window.input.setText(finished)
         QTest.keyClick(window.input, Qt.Key.Key_Return)

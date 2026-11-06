@@ -1292,7 +1292,16 @@ class ChatCardTests(unittest.TestCase):
         buttons["Выполнить"].click()
         QApplication.processEvents()
         pane.show_command_running("id-1")
-        pane.note_command_output("id-1", "token=secret\n", False)
+        pane.note_command_output(
+            "id-1",
+            "\x1b[H\x1b]0;C:\\WINDOWS\\system32\\conhost.exe \x1b[?25htoken=secret\n",
+            False,
+        )
+        live = pane.findChild(QPlainTextEdit, "commandCapture")
+        assert live is not None
+        self.assertIn("token=secret", live.toPlainText())
+        self.assertNotIn("conhost.exe", live.toPlainText())
+        self.assertNotIn("\x1b", live.toPlainText())
         pane.show_command_result(
             "id-1", "token=secret\n", "выполнено, код 0\ntoken=secret\n", 0
         )
@@ -1319,6 +1328,32 @@ class ChatCardTests(unittest.TestCase):
         self.assertTrue(delivered[0][2])
         self.assertEqual(delivered[0][3], "выполнено, код 0\ntoken=secret\n")
         self.assertEqual(delivered[0][4], 0)
+        pane.close()
+
+    def test_approval_card_stays_in_view_when_it_changes_state(self) -> None:
+        from PySide6.QtGui import QFont
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication, QFrame
+
+        from ui.chat_pane import ChatPane
+
+        pane = ChatPane(QFont("Consolas"))
+        pane.resize(420, 260)
+        pane.show()
+        QApplication.processEvents()
+        for number in range(12):
+            pane.append_message("user", f"сообщение {number} " + ("текст " * 12))
+        QTest.qWait(30)
+        pane.show_command_request("id-1", "посмотреть", "dir")
+        pane.show_command_running("id-1")
+        pane.show_command_result("id-1", "README\n" * 8, "выполнено, код 0\nREADME", 0)
+        QTest.qWait(30)
+        card = pane.findChild(QFrame, "commandRequest")
+        assert card is not None
+        bar = pane._scroll.verticalScrollBar()
+        viewport = pane._scroll.viewport().height()
+        self.assertGreaterEqual(card.y() + 8, bar.value())
+        self.assertLess(card.y(), bar.value() + viewport)
         pane.close()
 
     def test_terminal_accepts_a_command_while_output_waits(self) -> None:

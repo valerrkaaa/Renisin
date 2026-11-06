@@ -38,6 +38,133 @@ def _fingerprint(key) -> str:
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
+def classify_remote_shell(os_percent: str, env_os: str = "") -> str:
+    """'cmd', 'powershell' или 'unix' по ответу пробных echo."""
+    if "Windows_NT" in os_percent.replace("\x00", ""):
+        return "cmd"
+    if "Windows_NT" in env_os.replace("\x00", ""):
+        return "powershell"
+    return "unix"
+
+
+def _decode_remote(data: bytes) -> str:
+    if b"\x00" in data[:40]:
+        for encoding in ("utf-16", "utf-16-le"):
+            try:
+                return data.decode(encoding)
+            except Exception:
+                continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _is_windows_path(text: str) -> bool:
+    return (
+        len(text) >= 3
+        and text[0].isalpha()
+        and text[1] == ":"
+        and text[2] in "\\/"
+    )
+
+
+def _windows_temp_dir(text: str) -> str:
+    for line in reversed(text.replace("\r", "").split("\n")):
+        item = line.strip().strip('"')
+        if _is_windows_path(item):
+            return item.rstrip("\\/")
+    return r"C:\Windows\Temp"
+
+
+def _cmd_quote(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def windows_completion_target(text: str) -> tuple:
+    """Режим Tab: команда или путь, и части последнего токена.
+
+    Возвращает (mode, token, dir_part, name, sep).
+    """
+    raw = text.replace("\t", " ")
+    idx = -1
+    for index, char in enumerate(raw):
+        if char in " &|()":
+            idx = index
+    token = raw[idx + 1 :] if idx >= 0 else raw
+    is_command = idx < 0 or raw[idx] in "&|()"
+    if token.startswith('"') or token.startswith("'"):
+        token = token[1:]
+    if is_command:
+        return ("command", token, "", token, "\\")
+    sep_idx = max(token.rfind("\\"), token.rfind("/"))
+    if sep_idx >= 0:
+        return (
+            "path",
+            token,
+            token[: sep_idx + 1],
+            token[sep_idx + 1 :],
+            token[sep_idx],
+        )
+    return ("path", token, "", token, "\\")
+
+
+def assemble_windows_completions(
+    mode: str, dir_part: str, sep: str, raw: str
+) -> List[str]:
+    """Собрать варианты из строк удалённого PowerShell."""
+    matches: List[str] = []
+    seen: set = set()
+    for line in raw.replace("\r", "").split("\n"):
+        item = line.strip().lstrip("\ufeff")
+        if not item:
+            continue
+        if mode == "command":
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(item)
+            continue
+        kind, tab, name = item.partition("\t")
+        if tab != "\t" or kind not in ("D", "F") or not name or name in (".", ".."):
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        suffix = sep if kind == "D" else ""
+        matches.append(dir_part + name + suffix)
+    matches.sort(key=str.lower)
+    return matches[:300]
+
+
+def _present_completion(shell: str, completion: str, opening_quote: str) -> str:
+    if shell == "unix":
+        special = " \t\"'\\$`&|;<>()*?[]{}~!#"
+        if any(char in completion for char in special):
+            if opening_quote == "'":
+                return "'" + completion.replace("'", "'\\''") + "'"
+            if opening_quote == '"':
+                return '"' + completion.replace('"', '\\"') + '"'
+            return shlex.quote(completion)
+        return completion
+    special = " \t\"&|;<>()^"
+    if any(char in completion for char in special):
+        if opening_quote == "'":
+            return "'" + completion.replace("'", "''") + "'"
+        return '"' + completion.replace('"', '""') + '"'
+    return completion
+
+
+def _sftp_candidates(path: str) -> List[str]:
+    text = path.replace("\\", "/")
+    if len(text) >= 2 and text[1] == ":":
+        return ["/" + text, text]
+    return [text]
+
+
 _SUDO_RE = re.compile(r"(^|[\s;&|()])sudo(\s|$|[;&|()])")
 
 # Один PTY на всё SSH-подключение. sudo пишет билет в свою службу
@@ -221,6 +348,68 @@ done
 '''
 
 
+# Дополнение на Windows: команды PATH и встроенные, иначе имена файлов.
+# Аргументы приходят в base64, чтобы кавычки и кириллица не ломали строку.
+_WINDOWS_COMPLETE_SCRIPT = r"""
+$ErrorActionPreference='SilentlyContinue'
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+$mode='__MODE__'
+$kind='__KIND__'
+function Dec([string]$b){
+  if(-not $b){ return '' }
+  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))
+}
+$name=Dec '__NAME__'
+$dirPart=Dec '__DIR__'
+$cwd=Dec '__CWD__'
+if($cwd){ Set-Location -LiteralPath $cwd }
+function Out([string]$s){ [Console]::Out.WriteLine($s) }
+if($mode -eq 'command'){
+  $set=@{}
+  $builtins=@(
+    'assoc','attrib','call','cd','chcp','chdir','cls','cmd','color','copy',
+    'date','del','dir','echo','erase','exit','fc','find','findstr','help',
+    'ipconfig','md','mkdir','more','move','net','path','pause','popd',
+    'powershell','pushd','rd','ren','rename','rmdir','robocopy','sc','set',
+    'start','subst','systeminfo','taskkill','tasklist','time','title','tree',
+    'type','ver','vol','where','whoami','xcopy'
+  )
+  foreach($b in $builtins){
+    if($b.StartsWith($name,[StringComparison]::OrdinalIgnoreCase)){ $set[$b]=$true }
+  }
+  $types=@('Application')
+  if($kind -eq 'powershell'){ $types=@('Application','Alias','Cmdlet','Function') }
+  $wild=[System.Management.Automation.WildcardPattern]::Escape($name)+'*'
+  Get-Command $wild -CommandType $types | Select-Object -First 300 | ForEach-Object {
+    $n=$_.Name
+    if($name -notmatch '\.'){
+      foreach($e in '.exe','.bat','.cmd','.com','.msc'){
+        if($n.EndsWith($e,[StringComparison]::OrdinalIgnoreCase)){
+          $n=$n.Substring(0,$n.Length-$e.Length)
+          break
+        }
+      }
+    }
+    if($n.StartsWith($name,[StringComparison]::OrdinalIgnoreCase)){ $set[$n]=$true }
+  }
+  $set.Keys | Sort-Object | Select-Object -First 300 | ForEach-Object { Out $_ }
+  exit 0
+}
+$base=$dirPart
+if(-not $base){ $base=(Get-Location).Path }
+elseif($base -notmatch '^[A-Za-z]:[\\/]' -and -not $base.StartsWith('\\') -and -not $base.StartsWith('/')){
+  $base=Join-Path (Get-Location).Path $base
+}
+Get-ChildItem -LiteralPath $base -Force -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -ne '.' -and $_.Name -ne '..' -and $_.Name.StartsWith($name,[StringComparison]::OrdinalIgnoreCase) } |
+  Select-Object -First 300 | ForEach-Object {
+    $flag='F'
+    if($_.PSIsContainer){ $flag='D' }
+    Out ($flag+"`t"+$_.Name)
+  }
+"""
+
+
 class _VerifierPolicy(paramiko.MissingHostKeyPolicy):
     """Вызывает verifier для неизвестного ключа."""
 
@@ -269,6 +458,8 @@ class SSHSessionDriver:
         self._lock = threading.RLock()
         self._io_lock = threading.Lock()
         self._cwd: Optional[str] = None
+        self._remote_shell = "unix"
+        self._win_temp = ""
         self._monitor_stop = threading.Event()
         self._sudo_channel: Optional[paramiko.Channel] = None
         self._cols = 80
@@ -299,6 +490,15 @@ class SSHSessionDriver:
             raise ValueError("Не указаны параметры SSH-подключения")
         ssh = config.ssh
         client, jumps = self._connect_chain(config)
+
+        self._remote_shell = "unix"
+        self._win_temp = ""
+        try:
+            self._detect_remote_shell(client)
+        except Exception:
+            if domain.normalize_shell_family(config.shell_family) == domain.SHELL_WINDOWS:
+                self._remote_shell = "cmd"
+                self._win_temp = r"C:\Windows\Temp"
 
         with self._lock:
             self._client = client
@@ -534,23 +734,18 @@ class SSHSessionDriver:
         if token_full.startswith("'") or token_full.startswith('"'):
             opening_quote = token_full[0]
 
-        completions = self._complete_via_bash(client, cwd, text)
+        if self._remote_shell == "unix":
+            completions = self._complete_via_bash(client, cwd, text)
+        else:
+            completions = self._complete_via_windows(client, cwd, text)
         if not completions:
             return []
 
         matches: List[str] = []
-        for c in completions:
-            completion = c
-            if any(ch in completion for ch in " \t\"'\\$`&|;<>()*?[]{}~!#"):
-                if opening_quote == "'":
-                    escaped = completion.replace("'", "'\\''")
-                    completion = "'" + escaped + "'"
-                elif opening_quote == '"':
-                    escaped = completion.replace('"', '\\"')
-                    completion = '"' + escaped + '"'
-                else:
-                    completion = shlex.quote(completion)
-            matches.append(completion)
+        for completion in completions:
+            matches.append(
+                _present_completion(self._remote_shell, completion, opening_quote)
+            )
 
         seen: set = set()
         unique: List[str] = []
@@ -575,21 +770,49 @@ class SSHSessionDriver:
             + " " + shlex.quote(cwd or "")
         )
 
+        raw = self._read_exec(client, remote_cmd)
+        return [ln for ln in raw.split("\n") if ln]
+
+    def _complete_via_windows(
+        self,
+        client: paramiko.SSHClient,
+        cwd: Optional[str],
+        line: str,
+    ) -> List[str]:
+        """Команды и пути удалённой Windows. Bash там нет."""
+        mode, _token, dir_part, name, sep = windows_completion_target(line)
+        kind = "powershell" if self._remote_shell == "powershell" else "cmd"
+        script = (
+            _WINDOWS_COMPLETE_SCRIPT.replace("__MODE__", mode)
+            .replace("__KIND__", kind)
+            .replace("__NAME__", base64.b64encode(name.encode("utf-8")).decode("ascii"))
+            .replace("__DIR__", base64.b64encode(dir_part.encode("utf-8")).decode("ascii"))
+            .replace("__CWD__", base64.b64encode((cwd or "").encode("utf-8")).decode("ascii"))
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        command = (
+            "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded
+        )
+        raw = self._read_exec(client, command, timeout=8)
+        return assemble_windows_completions(mode, dir_part, sep, raw)
+
+    def _read_exec(
+        self, client: paramiko.SSHClient, command: str, timeout: float = 5.0
+    ) -> str:
         try:
             transport = client.get_transport()
             if transport is None or not transport.is_active():
-                return []
-            chan = transport.open_session(timeout=5.0)
+                return ""
+            chan = transport.open_session(timeout=timeout)
         except Exception:
-            return []
-
+            return ""
         data = b""
         try:
-            chan.settimeout(5.0)
+            chan.settimeout(timeout)
             try:
-                chan.exec_command(remote_cmd)
+                chan.exec_command(command)
             except Exception:
-                return []
+                return ""
             try:
                 chan.shutdown_write()
             except Exception:
@@ -611,11 +834,9 @@ class SSHSessionDriver:
                 chan.close()
             except Exception:
                 pass
-
         if not data:
-            return []
-        raw = data.decode("utf-8", errors="replace")
-        return [ln for ln in raw.split("\n") if ln]
+            return ""
+        return _decode_remote(data)
 
     # --- подключение ------------------------------------------------------
 
@@ -909,6 +1130,10 @@ class SSHSessionDriver:
     # --- выполнение команды -----------------------------------------------
 
     def _build_remote_script(self, text: str, cwd_file: str) -> str:
+        if self._remote_shell == "cmd":
+            return self._build_cmd_script(text, cwd_file)
+        if self._remote_shell == "powershell":
+            return self._build_powershell_script(text, cwd_file)
         lines: List[str] = []
         if self._cwd:
             lines.append(f"cd -- {shlex.quote(self._cwd)} 2>/dev/null || true")
@@ -919,6 +1144,49 @@ class SSHSessionDriver:
         lines.append("exit $__vibe_ec")
         return "\n".join(lines) + "\n"
 
+    def _build_cmd_script(self, text: str, cwd_file: str) -> str:
+        # Без BOM: иначе @echo off не срабатывает и cmd печатает весь сценарий.
+        # @ у служебных строк прячет их, даже если команда пользователя включит echo.
+        lines = ["@echo off", "@chcp 65001 >nul"]
+        if self._cwd:
+            lines.append(f"@cd /d {_cmd_quote(self._cwd)}")
+        body = text.replace("\r\n", "\n").replace("\r", "\n")
+        lines.extend(body.split("\n"))
+        lines.append("@set __vibe_ec=%ERRORLEVEL%")
+        lines.append(f"@cd > {_cmd_quote(cwd_file)}")
+        lines.append("@exit /b %__vibe_ec%")
+        return "\r\n".join(lines) + "\r\n"
+
+    def _build_powershell_script(self, text: str, cwd_file: str) -> str:
+        lines = ["$ErrorActionPreference = 'Continue'"]
+        if self._cwd:
+            lines.append(f"Set-Location -LiteralPath {_ps_quote(self._cwd)}")
+        lines.append(text.replace("\r\n", "\n").replace("\r", "\n"))
+        lines.append("$__vibe_ec = $LASTEXITCODE")
+        lines.append("if ($null -eq $__vibe_ec) { $__vibe_ec = 0 }")
+        lines.append(
+            "(Get-Location).Path | Set-Content -LiteralPath "
+            f"{_ps_quote(cwd_file)} -Encoding ascii"
+        )
+        lines.append("exit $__vibe_ec")
+        return "\n".join(lines) + "\n"
+
+    def _cwd_capture_path(self, tag: str) -> str:
+        if self._remote_shell == "unix":
+            return f"/tmp/vibe-cwd-{tag}"
+        root = self._win_temp or r"C:\Windows\Temp"
+        return root.rstrip("\\/") + f"\\vibe-cwd-{tag}.txt"
+
+    def _windows_script_path(self, tag: str) -> str:
+        root = self._win_temp or r"C:\Windows\Temp"
+        suffix = "bat" if self._remote_shell == "cmd" else "ps1"
+        return root.rstrip("\\/") + f"\\vibe-run-{tag}.{suffix}"
+
+    def _launch_uploaded(self, path: str) -> str:
+        if self._remote_shell == "powershell":
+            return "& " + _ps_quote(path)
+        return _cmd_quote(path)
+
     def _run_command(self, request: domain.CommandRequest) -> None:
         with self._lock:
             client = self._client
@@ -928,14 +1196,25 @@ class SSHSessionDriver:
             self._finish(request, None)
             return
 
-        if _SUDO_RE.search(request.text) and self._run_sudo_command(
-            request, client, cols, rows
+        if (
+            self._remote_shell == "unix"
+            and _SUDO_RE.search(request.text)
+            and self._run_sudo_command(request, client, cols, rows)
         ):
             return
 
         tag = uuid.uuid4().hex[:10]
-        cwd_file = f"/tmp/vibe-cwd-{tag}"
+        cwd_file = self._cwd_capture_path(tag)
         script = self._build_remote_script(request.text, cwd_file)
+        uploaded = ""
+        command = script
+        if self._remote_shell != "unix":
+            script_path = self._windows_script_path(tag)
+            if self._put_remote_text(client, script_path, script):
+                uploaded = script_path
+                command = self._launch_uploaded(script_path)
+            else:
+                command = script.lstrip("\ufeff")
 
         try:
             transport = client.get_transport()
@@ -945,8 +1224,9 @@ class SSHSessionDriver:
             channel.get_pty(
                 term="xterm-256color", width=cols, height=rows
             )
-            channel.exec_command(script)
+            channel.exec_command(command)
         except Exception as exc:
+            self._remove_remote_any(client, uploaded)
             self._emit_error(request, f"Не удалось выполнить команду: {exc}")
             self._finish(request, None)
             return
@@ -959,6 +1239,7 @@ class SSHSessionDriver:
                     channel.close()
                 except Exception:
                     pass
+                self._remove_remote_any(client, uploaded)
                 self._finish(request, None)
                 return
             self._channel = channel
@@ -1045,6 +1326,7 @@ class SSHSessionDriver:
         new_cwd = self._read_remote_cwd(client, cwd_file)
         if new_cwd:
             self._cwd = new_cwd
+        self._remove_remote_any(client, uploaded)
 
         with self._lock:
             alive = (
@@ -1548,9 +1830,57 @@ class SSHSessionDriver:
         finally:
             sftp.close()
 
+    def _detect_remote_shell(self, client: paramiko.SSHClient) -> None:
+        os_percent = self._remote_text(client, "echo %OS%")
+        if classify_remote_shell(os_percent) == "cmd":
+            self._remote_shell = "cmd"
+            self._win_temp = _windows_temp_dir(self._remote_text(client, "echo %TEMP%"))
+            return
+        env_os = self._remote_text(client, "echo $env:OS")
+        if classify_remote_shell("", env_os) == "powershell":
+            self._remote_shell = "powershell"
+            self._win_temp = _windows_temp_dir(
+                self._remote_text(client, "echo $env:TEMP")
+            )
+            return
+        self._remote_shell = "unix"
+
+    def _remote_text(self, client: paramiko.SSHClient, command: str) -> str:
+        _stdin, stdout, _stderr = client.exec_command(command, timeout=8)
+        return _decode_remote(stdout.read(4096))
+
+    def _put_remote_text(
+        self, client: paramiko.SSHClient, path: str, text: str
+    ) -> bool:
+        candidates = (
+            [path]
+            if self._remote_shell == "unix"
+            else _sftp_candidates(path)
+        )
+        for candidate in candidates:
+            try:
+                self._upload_text(client, candidate, text)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _remove_remote_any(self, client: paramiko.SSHClient, path: str) -> None:
+        if not path:
+            return
+        candidates = (
+            [path]
+            if self._remote_shell == "unix"
+            else _sftp_candidates(path)
+        )
+        for candidate in candidates:
+            self._remove_remote(client, candidate)
+
     def _read_remote_cwd(
         self, client: paramiko.SSHClient, path: str
     ) -> Optional[str]:
+        if self._remote_shell != "unix":
+            return self._read_sftp_text(client, path, delete=True)
         quoted = shlex.quote(path)
         try:
             _stdin, stdout, _stderr = client.exec_command(
@@ -1560,8 +1890,33 @@ class SSHSessionDriver:
             data = stdout.read(8192)
         except Exception:
             return None
-        text = data.decode("utf-8", errors="replace").strip()
+        text = _decode_remote(data).strip()
         return text or None
+
+    def _read_sftp_text(
+        self, client: paramiko.SSHClient, path: str, delete: bool
+    ) -> Optional[str]:
+        try:
+            sftp = client.open_sftp()
+        except Exception:
+            return None
+        try:
+            for candidate in _sftp_candidates(path):
+                try:
+                    with sftp.file(candidate, "rb") as handle:
+                        data = handle.read(8192)
+                except Exception:
+                    continue
+                if delete:
+                    try:
+                        sftp.remove(candidate)
+                    except Exception:
+                        pass
+                text = _decode_remote(data).strip().strip("\ufeff")
+                return text or None
+        finally:
+            sftp.close()
+        return None
 
     # --- эмиссия ----------------------------------------------------------
 

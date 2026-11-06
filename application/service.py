@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import domain
 import file_edit
+from screen_log import plain_terminal_text
 from application.command_rules import command_spans
 from application.master_password import MasterPassword
 from application.terminal_mcp import (
@@ -974,6 +975,7 @@ class ApplicationService:
             identity_passphrase=(
                 self._master_key_passphrase() if any(install_key) else None
             ),
+            shell_family=domain.normalize_shell_family(shell_family),
         )
 
         self._journal.create(session_id, password)
@@ -1082,6 +1084,7 @@ class ApplicationService:
             auth_secret=auth_secret,
             hop_secrets=hop_secrets,
             identity_passphrase=self._master_key_passphrase(),
+            shell_family=stored.shell_family,
         )
         driver = self._driver_factory(config.provider)
         driver.set_event_sink(self._handle_driver_event)
@@ -1143,6 +1146,7 @@ class ApplicationService:
             auth_secret=secret,
             hop_secrets=hops,
             identity_passphrase=self._master_key_passphrase(),
+            shell_family=connection.shell_family,
         )
         self._journal.create(session_id, journal)
         driver = self._driver_factory(config.provider)
@@ -1239,6 +1243,7 @@ class ApplicationService:
             auth_secret=auth_secret,
             hop_secrets=hop_secrets,
             identity_passphrase=self._master_key_passphrase(),
+            shell_family=stored.shell_family,
         )
         driver = self._driver_factory(config.provider)
         driver.set_event_sink(self._handle_driver_event)
@@ -2237,7 +2242,8 @@ class ApplicationService:
                 self.cancel_command(session_id)
                 watch.done.wait(5)
             self._raise_if_chat_stopped()
-            output = watch.output if watch.output.strip() else watch.live
+            raw_output = watch.output if watch.output.strip() else watch.live
+            output = plain_terminal_text(raw_output)
             if watch.refusal:
                 return refusal_reason(watch.refusal), output, watch.code
             if watch.interactive or watch.shell:
