@@ -363,8 +363,8 @@ class KeyUiTests(unittest.TestCase):
         self.assertFalse(dialog.ssh_install.isVisible())
         self.assertFalse(dialog.ssh_install.isChecked())
 
-        dialog.provider_combo.setCurrentIndex(
-            dialog.provider_combo.findData("ssh_over_ssh")
+        dialog.ssh_auth.setCurrentIndex(
+            dialog.ssh_auth.findData(domain.SSHAuthMethod.PASSWORD.value)
         )
         dialog._add_hop.click()
         QApplication.processEvents()

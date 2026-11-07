@@ -945,6 +945,7 @@ class ApplicationService:
         llm_profile_id: Optional[domain.ProfileId] = None,
         shell_family: str = domain.SHELL_UNIX,
         install_key: tuple[bool, ...] = (),
+        mcp_description: str = "",
     ) -> domain.SessionInfo:
         if not name.strip():
             raise ValueError("Имя сессии не может быть пустым")
@@ -994,6 +995,7 @@ class ApplicationService:
             updated = resolved()
             if updated is not None:
                 saved_ssh = updated
+        description = mcp_description.strip()
         connection_id = domain.new_connection_id()
         self._connections[connection_id] = domain.ConnectionInfo(
             connection_id=connection_id,
@@ -1001,6 +1003,7 @@ class ApplicationService:
             provider=config.provider,
             identity=config.identity,
             ssh=saved_ssh,
+            mcp_description=description,
             shell_family=domain.normalize_shell_family(shell_family),
         )
         info = domain.SessionInfo(
@@ -1011,6 +1014,7 @@ class ApplicationService:
             status=domain.SessionStatus.READY,
             ssh=saved_ssh,
             llm_profile_id=llm_profile_id,
+            mcp_description=description,
             shell_family=domain.normalize_shell_family(shell_family),
             connection_id=connection_id,
         )
@@ -2449,11 +2453,11 @@ class ApplicationService:
         info = self.get_session(session_id)
         if info is None:
             return
-        if info.os_name.strip():
+        if _clean_os_output(info.os_name):
             self._probe_identity(session_id, info)
             return
         remembered = self._journal_os(session_id)
-        if remembered:
+        if remembered and _clean_os_output(remembered):
             self._store_os(session_id, remembered)
             fresh = self.get_session(session_id)
             if fresh is not None:
@@ -2477,7 +2481,8 @@ class ApplicationService:
         """Сначала команды вероятной ОС, затем команды другой семьи."""
         windows = ("ver", "cmd /c ver")
         unix = ("uname -srm",)
-        if info.provider == domain.ProviderType.CMD:
+        family = domain.normalize_shell_family(info.shell_family)
+        if info.provider == domain.ProviderType.CMD or family == domain.SHELL_WINDOWS:
             return windows + unix
         return unix + windows
 
@@ -2495,7 +2500,7 @@ class ApplicationService:
         return plan[step]
 
     def _store_os(self, session_id: domain.SessionId, text: str) -> None:
-        cleaned = text.strip()
+        cleaned = _clean_os_output(text)
         if not cleaned:
             return
         stored = self._catalog.get(session_id)
@@ -2509,7 +2514,9 @@ class ApplicationService:
                 self._sessions[session_id] = replace(current, os_name=cleaned)
 
     def _begin_ip_probe(self, session_id: domain.SessionId, os_name: str) -> str:
-        plan = _ip_commands(os_name)
+        info = self.get_session(session_id)
+        family = info.shell_family if info is not None else ""
+        plan = _ip_commands(os_name, family)
         if not plan:
             self._finish_probe(session_id)
             return ""
@@ -2702,9 +2709,9 @@ class ApplicationService:
 
     def _session_os(self, session_id: domain.SessionId) -> str:
         info = self.get_session(session_id)
-        if info is not None and info.os_name.strip():
-            return info.os_name.strip()
-        return self._journal_os(session_id)
+        if info is not None and _clean_os_output(info.os_name):
+            return _clean_os_output(info.os_name)
+        return _clean_os_output(self._journal_os(session_id))
 
     def _os_fact(self, session_id: domain.SessionId) -> str:
         name = self._session_os(session_id)
@@ -3151,8 +3158,13 @@ class ApplicationService:
         )
 
 
-def _ip_commands(os_name: str) -> tuple:
-    if "windows" in os_name.lower():
+def _ip_commands(os_name: str, shell_family: str = "") -> tuple:
+    low = os_name.lower()
+    if "windows" in low:
+        return ("ipconfig",)
+    if any(hint in low for hint in ("linux", "darwin", "freebsd", "ubuntu", "debian")):
+        return ("ip addr", "ifconfig", "hostname -I")
+    if domain.normalize_shell_family(shell_family) == domain.SHELL_WINDOWS:
         return ("ipconfig",)
     return ("ip addr", "ifconfig", "hostname -I")
 
@@ -3288,14 +3300,35 @@ def _collect_addresses(raw: str) -> list:
     return found
 
 
+_OS_NOISE = (
+    "не является",
+    "командой, исполняемой",
+    "пакетным файлом",
+    "not recognized",
+    "is not recognized",
+    "operable program",
+    "batch file",
+    "command not found",
+    "no such file",
+    "not found",
+)
+
+
 def _clean_os_output(raw: str) -> str:
-    """Оставить строку с названием ОС из вывода ver или uname."""
+    """Оставить строку с названием ОС из вывода ver или uname.
+
+    Текст «команда не найдена» — не название ОС. На Windows так отвечает
+    uname, и раньше этот хвост попадал в параметры подключения, а IP не искался.
+    """
     lines = []
     for line in raw.replace("\r", "").splitlines():
-        cleaned = line.strip()
-        if not cleaned or cleaned in {"ver", "uname -srm", "cmd /c ver"}:
+        cleaned = line.strip().strip("'\"")
+        if not cleaned or cleaned in {"ver", "uname", "uname -srm", "cmd /c ver"}:
             continue
         if cleaned.startswith("__VIBE"):
+            continue
+        low = cleaned.lower()
+        if any(noise in low for noise in _OS_NOISE):
             continue
         lines.append(cleaned)
     if not lines:

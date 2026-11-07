@@ -89,6 +89,7 @@ class _Driver:
         self.closed = False
         self.sent = []
         self.os_output = ""
+        self.outputs: dict[str, str] = {}
 
     def set_event_sink(self, sink) -> None:
         self.sink = sink
@@ -101,14 +102,15 @@ class _Driver:
         sink = getattr(self, "sink", None)
         if sink is None:
             return
-        if self.os_output:
+        payload = self.outputs.get(request.text.strip(), self.os_output)
+        if payload:
             sink(domain.OutputEvent(
                 session_id=request.session_id,
                 event_type=domain.EventType.OUTPUT_CHUNK,
                 timestamp=datetime.now(),
                 command_id=request.command_id,
                 stream_type=domain.StreamType.STDOUT,
-                payload=self.os_output,
+                payload=payload,
                 persist=True,
             ))
         sink(domain.OutputEvent(
@@ -577,6 +579,20 @@ class OsPromptTests(unittest.TestCase):
         )
         self.assertEqual(_clean_os_output("ver\n"), "")
         self.assertEqual(
+            _clean_os_output(
+                "'uname' не является внутренней или внешней\n"
+                "командой, исполняемой программой или пакетным файлом.\n"
+            ),
+            "",
+        )
+        self.assertEqual(
+            _clean_os_output(
+                "'uname' is not recognized as an internal or external command,\n"
+                "operable program or batch file.\n"
+            ),
+            "",
+        )
+        self.assertEqual(
             _collect_addresses(
                 "IPv4 Address. . . . . . . . . . . : 192.168.1.20\n"
                 "IPv4-адрес . . . . . . . . . . . . : 10.0.0.5\n"
@@ -712,6 +728,65 @@ class OsPromptTests(unittest.TestCase):
             "Linux 6.8.0-45-generic x86_64",
             service._system_prompt(unknown.session_id),
         )
+
+    def test_windows_ssh_ignores_uname_error_and_reads_ip(self) -> None:
+        service, driver, _journal, _profiles, _client = _service()
+        driver.outputs = {
+            "uname -srm": (
+                "'uname' не является внутренней или внешней\n"
+                "командой, исполняемой программой или пакетным файлом.\n"
+            ),
+            "ver": "\nMicrosoft Windows [Version 10.0.26200.8037]\n",
+            "ipconfig": "IPv4 Address. . . . . . . . . . . : 10.1.1.8\n",
+            "whoami": "val_g\n",
+        }
+        info = service.create_session(
+            "windows-ssh",
+            "pw",
+            provider=domain.ProviderType.SSH,
+            ssh=domain.SSHConfig(
+                host="10.0.0.8",
+                username="val_g",
+                auth_method=domain.SSHAuthMethod.PASSWORD,
+            ),
+            auth_secret="secret",
+            mcp_description="стенд windows",
+        )
+        stored = service.get_session(info.session_id)
+        assert stored is not None
+        self.assertEqual(
+            driver.sent[:4],
+            ["uname -srm", "ver", "ipconfig", "whoami"],
+        )
+        self.assertIn("Microsoft Windows", stored.os_name)
+        self.assertNotIn("командой", stored.os_name)
+        self.assertEqual(stored.ip_addresses, "10.1.1.8")
+        self.assertEqual(stored.username, "val_g")
+        self.assertEqual(stored.mcp_description, "стенд windows")
+
+        driver.sent.clear()
+        driver.outputs = {
+            "ver": "\nMicrosoft Windows [Version 10.0.26200.8037]\n",
+            "ipconfig": "IPv4-адрес . . . . . . . . . . . . : 10.1.1.9\n",
+            "whoami": "admin\n",
+        }
+        chosen = service.create_session(
+            "windows-family",
+            "pw",
+            provider=domain.ProviderType.SSH,
+            ssh=domain.SSHConfig(
+                host="10.0.0.9",
+                username="admin",
+                auth_method=domain.SSHAuthMethod.PASSWORD,
+            ),
+            auth_secret="secret",
+            shell_family=domain.SHELL_WINDOWS,
+        )
+        picked = service.get_session(chosen.session_id)
+        assert picked is not None
+        self.assertEqual(driver.sent[:3], ["ver", "ipconfig", "whoami"])
+        self.assertIn("Microsoft Windows", picked.os_name)
+        self.assertEqual(picked.ip_addresses, "10.1.1.9")
 
 
 class ChatUiTests(unittest.TestCase):

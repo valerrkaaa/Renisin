@@ -254,23 +254,22 @@ class ChainDialogTests(unittest.TestCase):
         self.assertEqual(dialog.provider_combo.currentData(), "cmd")
         dialog.show()
         QApplication.processEvents()
-        chain = dialog.provider_combo.findData("ssh_over_ssh")
-        dialog.provider_combo.setCurrentIndex(chain)
+        self.assertLess(dialog.provider_combo.findData("ssh_over_ssh"), 0)
+        dialog.provider_combo.setCurrentIndex(dialog.provider_combo.findData("ssh"))
         QApplication.processEvents()
         self.assertTrue(dialog._chain_container.isVisible())
         self.assertEqual(len(dialog._hop_rows), 1)
+        self.assertEqual(dialog._hop_rows[0].title.text(), "Подключение")
         self.assertFalse(dialog._hop_rows[0].remove_button.isEnabled())
         dialog._add_hop.click()
         QApplication.processEvents()
         self.assertEqual(len(dialog._hop_rows), 2)
-        self.assertEqual(dialog._hop_rows[1].title.text(), "Узел 2")
+        self.assertEqual(dialog._hop_rows[0].title.text(), "Промежуточное 1")
+        self.assertEqual(dialog._hop_rows[1].title.text(), "Подключение")
         self.assertFalse(dialog._hop_rows[0].remove_button.isEnabled())
         self.assertTrue(dialog._hop_rows[1].remove_button.isEnabled())
 
-        dialog.provider_combo.setCurrentIndex(dialog.provider_combo.findData("ssh_over_ssh"))
-        QApplication.processEvents()
         self.assertTrue(dialog._chain_container.isVisible())
-        self.assertFalse(dialog._ssh_container.isVisible())
         self.assertEqual(dialog._hop_rows[0].port.value(), 22)
         dialog._hop_rows[0].host.setText("10.0.0.1")
         dialog._hop_rows[0].user.setText("jump")
@@ -285,8 +284,9 @@ class ChainDialogTests(unittest.TestCase):
         dialog._hop_rows[1].key_path.setText("C:/keys/app")
         self.assertEqual(
             dialog._chain_route.text(),
-            "jump@10.0.0.1:2222 → app@10.0.0.2:2200",
+            "Порядок входа: jump@10.0.0.1:2222 → app@10.0.0.2:2200",
         )
+        dialog.description_edit.setText("  джамп до приложения  ")
         request = dialog._chain_request("цепочка", "journal", "m-1")
         assert request is not None and request.ssh is not None
         self.assertEqual(request.ssh.port, 2222)
@@ -296,6 +296,8 @@ class ChainDialogTests(unittest.TestCase):
         self.assertEqual(request.ssh.hops[0].auth_method, domain.SSHAuthMethod.PRIVATE_KEY)
         self.assertEqual(request.ssh.hops[0].private_key_path, "C:/keys/app")
         self.assertEqual(request.hop_secrets, ("",))
+        self.assertEqual(request.description, "джамп до приложения")
+        self.assertEqual(request.provider, domain.ProviderType.SSH_OVER_SSH)
         dialog.close()
 
     def test_ok_shows_the_error_and_does_not_stay_busy(self) -> None:
@@ -320,7 +322,7 @@ class ChainDialogTests(unittest.TestCase):
         dialog.show()
         QApplication.processEvents()
         dialog.provider_combo.setCurrentIndex(
-            dialog.provider_combo.findData("ssh_over_ssh")
+            dialog.provider_combo.findData("ssh")
         )
         dialog.name_edit.setText("цепочка")
         dialog._add_hop.click()
