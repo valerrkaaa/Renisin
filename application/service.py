@@ -30,8 +30,10 @@ from application.terminal_mcp import (
     lounge_origin,
     lounge_tab_id,
     lounge_tools,
+    nested_shell_note,
     normalize_command,
     openai_tools,
+    shell_command_note,
     command_text,
     split_shell_commands,
     promote_shell_actions,
@@ -1861,7 +1863,10 @@ class ApplicationService:
         if history is None:
             history = self._active_chat(session_id)
         if tools is None:
-            tools = openai_tools(self._session_os(session_id))
+            tools = openai_tools(
+                self._session_os(session_id),
+                self.session_shell_fact(session_id),
+            )
         if system is None:
             system = self._system_prompt(session_id)
         messages: List[dict] = [{"role": "system", "content": system}]
@@ -2719,6 +2724,25 @@ class ApplicationService:
             return "ОС: " + name
         return "ОС не определена"
 
+    def _command_dialect(self, session_id: domain.SessionId) -> str:
+        """cmd, powershell или unix у живого драйвера. Пусто, если сессия закрыта."""
+        with self._lock:
+            driver = self._drivers.get(session_id)
+        reader = getattr(driver, "command_dialect", None)
+        if not callable(reader):
+            return ""
+        try:
+            return str(reader() or "").strip().lower()
+        except Exception:
+            return ""
+
+    def session_shell_fact(self, session_id: domain.SessionId) -> str:
+        """Фраза для модели: куда реально уйдёт run_command."""
+        nested = self.shell_label(session_id).strip()
+        if nested:
+            return nested_shell_note(nested)
+        return shell_command_note(self._command_dialect(session_id))
+
     def _mcp_facts(self, session_id: domain.SessionId) -> str:
         info = self.get_session(session_id)
         parts = [self._os_fact(session_id)]
@@ -2730,7 +2754,10 @@ class ApplicationService:
             parts.append("Пользователь: " + info.username.strip())
         else:
             parts.append("Пользователь не определён")
-        return ". ".join(parts)
+        shell = self.session_shell_fact(session_id).strip()
+        if shell and shell[-1] not in ".!?":
+            shell += "."
+        return ". ".join(parts) + ". " + shell
 
     def session_operating_system(self, session_id: domain.SessionId) -> str:
         """Строка ОС из настроек сессии или из журнала, если поле ещё пустое."""
@@ -2757,10 +2784,14 @@ class ApplicationService:
             user_line = (
                 "Имя пользователя этой сессии не определено. Не выдумывай логин.\n"
             )
+        shell = self.session_shell_fact(session_id).strip()
+        if shell and shell[-1] not in ".!?":
+            shell += "."
         tail = (
-            ip_line
+            shell + "\n"
+            + ip_line
             + user_line
-            + "ОС, IP и имя пользователя заданы этой инструкцией и остаются после сброса контекста.\n"
+            + "ОС, оболочка, IP и имя пользователя заданы этой инструкцией и остаются после сброса контекста.\n"
         )
         if os_name:
             note = (
@@ -2908,15 +2939,19 @@ class ApplicationService:
                 targets = self._lounge_targets()
                 names = []
                 os_by_name = {}
+                shell_by_name = {}
                 for info in targets:
                     label = self.mcp_label(info)
                     names.append(label)
                     os_by_name.setdefault(label, self._session_os(info.session_id))
+                    shell_by_name.setdefault(
+                        label, self.session_shell_fact(info.session_id)
+                    )
                 answer, warning = self._complete_with_tools(
                     "",
                     profile,
                     history=self._lounge_model_history(tab_id),
-                    tools=lounge_tools(names, os_by_name),
+                    tools=lounge_tools(names, os_by_name, shell_by_name),
                     note=lambda kind, payload: self._remember_lounge(
                         tab_id,
                         "assistant" if kind == domain.EventType.CHAT_ASSISTANT else "user",

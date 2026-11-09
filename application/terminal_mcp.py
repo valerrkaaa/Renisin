@@ -401,20 +401,60 @@ def os_command_note(os_name: str) -> str:
     )
 
 
-def openai_tools(os_name: str = "") -> list:
+def shell_command_note(dialect: str) -> str:
+    """Фраза для модели: в какой оболочке выполнится команда."""
+    kind = (dialect or "").strip().lower()
+    if kind == "cmd":
+        return (
+            "Оболочка: Windows cmd. Разделяй команды символом &. "
+            "Не используй синтаксис PowerShell."
+        )
+    if kind == "powershell":
+        return (
+            "Оболочка: Windows PowerShell. Разделяй команды точкой с запятой. "
+            "Не используй синтаксис cmd: 2>nul, findstr, %VAR%."
+        )
+    if kind == "unix":
+        return "Оболочка: bash. Разделяй команды точкой с запятой."
+    return "оболочка не определена"
+
+
+def nested_shell_note(label: str) -> str:
+    """Команды уходят во вложенную оболочку, а не в оболочку входа."""
+    name = " ".join(label.split())
+    return f"Сейчас команды уходят во вложенную оболочку: {name}"
+
+
+def _with_shell(text: str, shell_note: str) -> str:
+    note = shell_note.strip()
+    if not note:
+        return text
+    if note[-1] not in ".!?":
+        note += "."
+    return text + " " + note
+
+
+def openai_tools(os_name: str = "", shell_note: str = "") -> list:
     return [
         {
             "type": "function",
             "function": {
                 "name": TOOL_NAME,
-                "description": TOOL_DESCRIPTION + os_command_note(os_name),
+                "description": _with_shell(
+                    TOOL_DESCRIPTION + os_command_note(os_name),
+                    shell_note,
+                ),
                 "parameters": input_schema(),
             },
         }
     ]
 
 
-def lounge_tools(names: List[str], os_by_name: Optional[dict] = None) -> list:
+def lounge_tools(
+    names: List[str],
+    os_by_name: Optional[dict] = None,
+    shell_by_name: Optional[dict] = None,
+) -> list:
     """Тот же run_command, но с именем MCP и его ОС."""
     shown = ", ".join(names) if names else "нет подключённых MCP"
     schema = input_schema()
@@ -427,9 +467,16 @@ def lounge_tools(names: List[str], os_by_name: Optional[dict] = None) -> list:
     if names:
         notes = []
         known = os_by_name or {}
+        shells = shell_by_name or {}
         for name in names:
             system = str(known.get(name) or "").strip() or "ОС не определена"
-            notes.append(f"{name} — {system}")
+            note = f"{name} — {system}"
+            shell = str(shells.get(name) or "").strip()
+            if shell:
+                if shell[-1] not in ".!?":
+                    shell += "."
+                note += ". " + shell
+            notes.append(note)
         os_text = (
             " У каждого MCP своя ОС: "
             + "; ".join(notes)

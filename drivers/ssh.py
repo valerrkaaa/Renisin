@@ -82,6 +82,90 @@ def _ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+_CWD_MARK = "__VIBE_CWD__"
+
+
+def _encode_powershell(script: str) -> str:
+    """Команда без кавычек: sshd на Windows оборачивает её в cmd /c \"...\"."""
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded
+
+
+class _CwdMark:
+    """Прячет служебную строку каталога и забирает из неё путь."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self.cwd = ""
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        visible: List[str] = []
+        while True:
+            index = self._buf.find(_CWD_MARK)
+            if index < 0:
+                hold = _marker_prefix_len(self._buf, _CWD_MARK)
+                if hold:
+                    visible.append(self._buf[:-hold])
+                    self._buf = self._buf[-hold:]
+                else:
+                    visible.append(self._buf)
+                    self._buf = ""
+                break
+            visible.append(self._buf[:index])
+            rest = self._buf[index + len(_CWD_MARK) :]
+            newline = rest.find("\n")
+            if newline < 0:
+                self._buf = self._buf[index:]
+                break
+            self._keep_cwd(rest[:newline])
+            self._buf = rest[newline + 1 :]
+        return "".join(visible)
+
+    def flush(self) -> str:
+        if _CWD_MARK in self._buf:
+            index = self._buf.find(_CWD_MARK)
+            self._keep_cwd(self._buf[index + len(_CWD_MARK) :])
+            visible = self._buf[:index]
+            self._buf = ""
+            return visible
+        visible = self._buf
+        self._buf = ""
+        return visible
+
+    def _keep_cwd(self, text: str) -> None:
+        path = text.strip().strip("\r")
+        if _is_windows_path(path):
+            self.cwd = path.rstrip("\\/")
+
+
+def _powershell_hosts_bat(bat: str, tag: str) -> str:
+    """Пишет bat в %TEMP% и запускает его. Каталог заранее не выбирается."""
+    payload = base64.b64encode(bat.encode("utf-8")).decode("ascii")
+    return (
+        "$ProgressPreference = 'SilentlyContinue'\n"
+        "$root = $env:TEMP\n"
+        "if ([string]::IsNullOrWhiteSpace($root)) { $root = 'C:\\Windows\\Temp' }\n"
+        f"$path = Join-Path $root 'vibe-run-{tag}.bat'\n"
+        f"$cwd = Join-Path $root 'vibe-cwd-{tag}.txt'\n"
+        f"$bat = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))\n"
+        "$utf8 = New-Object System.Text.UTF8Encoding $false\n"
+        "[IO.File]::WriteAllText($path, $bat, $utf8)\n"
+        "$shell = $env:ComSpec\n"
+        "if ([string]::IsNullOrWhiteSpace($shell)) { $shell = 'cmd.exe' }\n"
+        "& $shell /d /s /c ('call \"' + $path + '\"')\n"
+        "$code = $LASTEXITCODE\n"
+        "Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue\n"
+        "if (Test-Path -LiteralPath $cwd) {\n"
+        "  $saved = [IO.File]::ReadAllText($cwd).Trim()\n"
+        "  Remove-Item -LiteralPath $cwd -Force -ErrorAction SilentlyContinue\n"
+        "  if ($saved) { Write-Output ('" + _CWD_MARK + "' + $saved) }\n"
+        "}\n"
+        "if ($null -eq $code) { $code = 0 }\n"
+        "exit $code\n"
+    )
+
+
 def windows_completion_target(text: str) -> tuple:
     """Режим Tab: команда или путь, и части последнего токена.
 
@@ -459,6 +543,7 @@ class SSHSessionDriver:
         self._io_lock = threading.Lock()
         self._cwd: Optional[str] = None
         self._remote_shell = "unix"
+        self._shell_family = domain.SHELL_UNIX
         self._win_temp = ""
         self._monitor_stop = threading.Event()
         self._sudo_channel: Optional[paramiko.Channel] = None
@@ -493,12 +578,17 @@ class SSHSessionDriver:
 
         self._remote_shell = "unix"
         self._win_temp = ""
+        family = domain.normalize_shell_family(config.shell_family)
+        self._shell_family = family
         try:
             self._detect_remote_shell(client)
         except Exception:
-            if domain.normalize_shell_family(config.shell_family) == domain.SHELL_WINDOWS:
+            if family == domain.SHELL_WINDOWS:
                 self._remote_shell = "cmd"
                 self._win_temp = r"C:\Windows\Temp"
+        if self._remote_shell == "unix" and family == domain.SHELL_WINDOWS:
+            self._remote_shell = "cmd"
+            self._win_temp = self._win_temp or r"C:\Windows\Temp"
 
         with self._lock:
             self._client = client
@@ -523,6 +613,10 @@ class SSHSessionDriver:
         ).start()
 
         return config.session_id
+
+    def command_dialect(self) -> str:
+        """Оболочка, в которой выполняются команды: cmd, powershell или unix."""
+        return self._remote_shell
 
     def resolved_ssh(self) -> Optional[domain.SSHConfig]:
         """Цепочка после записи ключа: узлы с галочкой становятся входом по ключу."""
@@ -1148,7 +1242,7 @@ class SSHSessionDriver:
         # Без BOM: иначе @echo off не срабатывает и cmd печатает весь сценарий.
         # @ у служебных строк прячет их, даже если команда пользователя включит echo.
         lines = ["@echo off", "@chcp 65001 >nul"]
-        if self._cwd:
+        if self._cwd and _is_windows_path(self._cwd):
             lines.append(f"@cd /d {_cmd_quote(self._cwd)}")
         body = text.replace("\r\n", "\n").replace("\r", "\n")
         lines.extend(body.split("\n"))
@@ -1159,7 +1253,7 @@ class SSHSessionDriver:
 
     def _build_powershell_script(self, text: str, cwd_file: str) -> str:
         lines = ["$ErrorActionPreference = 'Continue'"]
-        if self._cwd:
+        if self._cwd and _is_windows_path(self._cwd):
             lines.append(f"Set-Location -LiteralPath {_ps_quote(self._cwd)}")
         lines.append(text.replace("\r\n", "\n").replace("\r", "\n"))
         lines.append("$__vibe_ec = $LASTEXITCODE")
@@ -1177,15 +1271,29 @@ class SSHSessionDriver:
         root = self._win_temp or r"C:\Windows\Temp"
         return root.rstrip("\\/") + f"\\vibe-cwd-{tag}.txt"
 
-    def _windows_script_path(self, tag: str) -> str:
-        root = self._win_temp or r"C:\Windows\Temp"
-        suffix = "bat" if self._remote_shell == "cmd" else "ps1"
-        return root.rstrip("\\/") + f"\\vibe-run-{tag}.{suffix}"
-
-    def _launch_uploaded(self, path: str) -> str:
+    def _windows_launch(self, text: str, tag: str) -> str:
         if self._remote_shell == "powershell":
-            return "& " + _ps_quote(path)
-        return _cmd_quote(path)
+            return _encode_powershell(self._powershell_marker_script(text))
+        cwd_file = "%TEMP%\\vibe-cwd-" + tag + ".txt"
+        return _encode_powershell(
+            _powershell_hosts_bat(self._build_cmd_script(text, cwd_file), tag)
+        )
+
+    def _powershell_marker_script(self, text: str) -> str:
+        lines = [
+            "$ProgressPreference = 'SilentlyContinue'",
+            "$ErrorActionPreference = 'Continue'",
+        ]
+        if self._cwd and _is_windows_path(self._cwd):
+            lines.append(f"Set-Location -LiteralPath {_ps_quote(self._cwd)}")
+        lines.append(text.replace("\r\n", "\n").replace("\r", "\n"))
+        lines.append("$code = $LASTEXITCODE")
+        lines.append("if ($null -eq $code) { $code = 0 }")
+        lines.append(
+            "Write-Output ('" + _CWD_MARK + "' + (Get-Location).Path)"
+        )
+        lines.append("exit $code")
+        return "\n".join(lines) + "\n"
 
     def _run_command(self, request: domain.CommandRequest) -> None:
         with self._lock:
@@ -1204,26 +1312,33 @@ class SSHSessionDriver:
             return
 
         tag = uuid.uuid4().hex[:10]
-        cwd_file = self._cwd_capture_path(tag)
-        script = self._build_remote_script(request.text, cwd_file)
+        interactive = shell_takeover.opens_shell(request.text)
         uploaded = ""
-        command = script
-        if self._remote_shell != "unix":
-            script_path = self._windows_script_path(tag)
-            if self._put_remote_text(client, script_path, script):
-                uploaded = script_path
-                command = self._launch_uploaded(script_path)
-            else:
-                command = script.lstrip("\ufeff")
+        if self._remote_shell == "unix":
+            cwd_file = self._cwd_capture_path(tag)
+            command = self._build_remote_script(request.text, cwd_file)
+            use_pty = True
+        elif interactive:
+            cwd_file = ""
+            command = request.text
+            use_pty = True
+        else:
+            # Quoted bat path: sshd wraps the line in cmd /c "...".
+            # A missing directory then prints only
+            # "The system cannot find the path specified."
+            cwd_file = ""
+            command = self._windows_launch(request.text, tag)
+            use_pty = False
 
         try:
             transport = client.get_transport()
             if transport is None or not transport.is_active():
                 raise RuntimeError("SSH-соединение не установлено")
             channel = transport.open_session(timeout=15)
-            channel.get_pty(
-                term="xterm-256color", width=cols, height=rows
-            )
+            if use_pty:
+                channel.get_pty(
+                    term="xterm-256color", width=cols, height=rows
+                )
             channel.exec_command(command)
         except Exception as exc:
             self._remove_remote_any(client, uploaded)
@@ -1254,11 +1369,32 @@ class SSHSessionDriver:
                 pass
 
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        mark = None if use_pty else _CwdMark()
         watch = (
             shell_takeover.PromptWatch()
-            if shell_takeover.opens_shell(request.text)
+            if interactive
             else None
         )
+
+        def take(text: str, *, raw: bool = False) -> None:
+            if mark is not None and not raw:
+                text = mark.feed(text)
+            if not text:
+                return
+            with self._io_lock:
+                screen.feed(text)
+                fed_cols, fed_rows = screen.columns, screen.lines
+                fed_alt = screen.in_alternate_screen
+            self._emit_chunk(
+                request,
+                domain.StreamType.STDOUT,
+                text,
+                persist=False,
+                columns=fed_cols,
+                rows=fed_rows,
+                alternate=fed_alt,
+            )
+
         if watch is not None:
             try:
                 channel.settimeout(0.3)
@@ -1277,40 +1413,27 @@ class SSHSessionDriver:
                     continue
                 except Exception:
                     break
-                if not data:
+                err = b""
+                if not use_pty:
+                    while channel.recv_stderr_ready():
+                        chunk = channel.recv_stderr(8192)
+                        if not chunk:
+                            break
+                        err += chunk
+                if not data and not err:
                     break
                 if watch is not None:
                     watch.mark()
-                text = decoder.decode(data)
+                text = decoder.decode(data + err)
                 if text:
-                    with self._io_lock:
-                        screen.feed(text)
-                        fed_cols, fed_rows = screen.columns, screen.lines
-                        fed_alt = screen.in_alternate_screen
-                    self._emit_chunk(
-                        request,
-                        domain.StreamType.STDOUT,
-                        text,
-                        persist=False,
-                        columns=fed_cols,
-                        rows=fed_rows,
-                        alternate=fed_alt,
-                    )
+                    take(text)
             tail = decoder.decode(b"", final=True)
             if tail:
-                with self._io_lock:
-                    screen.feed(tail)
-                    fed_cols, fed_rows = screen.columns, screen.lines
-                    fed_alt = screen.in_alternate_screen
-                self._emit_chunk(
-                    request,
-                    domain.StreamType.STDOUT,
-                    tail,
-                    persist=False,
-                    columns=fed_cols,
-                    rows=fed_rows,
-                    alternate=fed_alt,
-                )
+                take(tail)
+            if mark is not None:
+                rest = mark.flush()
+                if rest:
+                    take(rest, raw=True)
         finally:
             with self._lock:
                 if self._channel is channel:
@@ -1323,9 +1446,12 @@ class SSHSessionDriver:
         except Exception:
             exit_code = None
 
-        new_cwd = self._read_remote_cwd(client, cwd_file)
-        if new_cwd:
-            self._cwd = new_cwd
+        if mark is not None and mark.cwd:
+            self._cwd = mark.cwd
+        elif cwd_file:
+            new_cwd = self._read_remote_cwd(client, cwd_file)
+            if new_cwd:
+                self._cwd = new_cwd
         self._remove_remote_any(client, uploaded)
 
         with self._lock:

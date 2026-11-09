@@ -2773,5 +2773,67 @@ def _post(url: str, payload: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+class ShellDialectTests(unittest.TestCase):
+    def test_drivers_report_the_shell_they_execute(self) -> None:
+        from drivers.cmd import CmdSessionDriver
+        from drivers.ssh import SSHSessionDriver
+
+        self.assertEqual(CmdSessionDriver().command_dialect(), "cmd")
+        ssh = SSHSessionDriver(host_key_verifier=None, known_hosts_path="")
+        ssh._remote_shell = "powershell"
+        self.assertEqual(ssh.command_dialect(), "powershell")
+        ssh._remote_shell = "unix"
+        self.assertEqual(ssh.command_dialect(), "unix")
+
+    def test_mcp_description_names_cmd_powershell_or_bash(self) -> None:
+        from application.terminal_mcp import lounge_tools, openai_tools
+
+        driver = _Driver()
+        driver.command_dialect = lambda: "cmd"
+        service, driver, profiles = _world(driver)
+        info = _session(service, profiles)
+
+        facts = service._mcp_facts(info.session_id)
+        prompt = service._system_prompt(info.session_id)
+        self.assertIn("Оболочка: Windows cmd", facts)
+        self.assertIn("символом &", facts)
+        self.assertIn("Оболочка: Windows cmd", prompt)
+        described = openai_tools(
+            service.session_operating_system(info.session_id),
+            service.session_shell_fact(info.session_id),
+        )[0]["function"]["description"]
+        self.assertIn("Windows cmd", described)
+
+        driver.command_dialect = lambda: "powershell"
+        powershell = service._mcp_facts(info.session_id)
+        self.assertIn("Windows PowerShell", powershell)
+        self.assertIn("2>nul", powershell)
+        self.assertNotIn("Windows cmd", powershell)
+
+        driver.command_dialect = lambda: "unix"
+        bash = service.session_shell_fact(info.session_id)
+        self.assertIn("Оболочка: bash", bash)
+        listed = lounge_tools(
+            [info.name],
+            {info.name: "Linux"},
+            {info.name: bash},
+        )[0]["function"]["description"]
+        self.assertIn("Оболочка: bash", listed)
+
+        service._shell_labels[info.session_id] = "bash"
+        nested = service._mcp_facts(info.session_id)
+        self.assertIn("вложенную оболочку: bash", nested)
+        self.assertNotIn("Windows cmd", nested)
+        self.assertNotIn("Оболочка: bash", nested)
+
+        service._shell_labels.pop(info.session_id, None)
+        with service._lock:
+            service._drivers.pop(info.session_id, None)
+        missing = service._mcp_facts(info.session_id)
+        self.assertIn("оболочка не определена", missing)
+        self.assertNotIn("Windows cmd", missing)
+        self.assertNotIn("PowerShell", missing)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -297,7 +297,7 @@ def _tool_description(service, session_id: Optional[str]) -> str:
         f"в терминале сессии «{title}»",
         1,
     )
-    return described + os_command_note(os_name)
+    return described + os_command_note(os_name) + _shell_suffix(service, bound)
 
 
 def _foreground_id(service) -> str:
@@ -305,6 +305,20 @@ def _foreground_id(service) -> str:
     if not callable(reader):
         return ""
     return str(reader() or "")
+
+
+def _shell_suffix(service, session_id: str) -> str:
+    if not session_id:
+        return ""
+    reader = getattr(service, "session_shell_fact", None)
+    if not callable(reader):
+        return ""
+    note = str(reader(session_id) or "").strip()
+    if not note:
+        return ""
+    if note[-1] not in ".!?":
+        note += "."
+    return " " + note
 
 
 def _known_os(service, session_id: str) -> str:

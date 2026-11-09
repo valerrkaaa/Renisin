@@ -72,6 +72,10 @@ class CmdSessionDriver:
     def set_event_sink(self, sink: Callable[[domain.OutputEvent], None]) -> None:
         self._sink = sink
 
+    def command_dialect(self) -> str:
+        """Локальные команды всегда идут в cmd.exe."""
+        return "cmd"
+
     def open(self, config: domain.SessionConfig) -> domain.SessionId:
         if config.provider != domain.ProviderType.CMD:
             raise ValueError(f"Неподдерживаемый провайдер: {config.provider!r}")

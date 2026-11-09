@@ -4,7 +4,12 @@
 """Команды SSH на Windows не оборачиваются в синтаксис bash."""
 from __future__ import annotations
 
+import base64
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from drivers.ssh import (
     SSHSessionDriver,
+    _CwdMark,
     _present_completion,
     _windows_temp_dir,
     assemble_windows_completions,
@@ -120,6 +126,98 @@ class WindowsRemoteScriptTests(unittest.TestCase):
         self.assertEqual(found, ["dir", "ipconfig"])
         self.assertIn("powershell.exe", seen["command"])
         self.assertNotIn("bash -c", seen["command"])
+
+
+class WindowsLaunchTests(unittest.TestCase):
+    def _driver(self) -> SSHSessionDriver:
+        driver = SSHSessionDriver(host_key_verifier=None, known_hosts_path="")
+        driver._remote_shell = "cmd"
+        driver._win_temp = r"C:\no\such\dir"
+        return driver
+
+    def test_marker_is_removed_from_the_output(self) -> None:
+        mark = _CwdMark()
+        visible = mark.feed("hello\r\n__VIBE_CWD__C:\\Windows\r\n")
+        self.assertEqual(visible, "hello\r\n")
+        self.assertEqual(mark.flush(), "")
+        self.assertEqual(mark.cwd, r"C:\Windows")
+
+    def test_launch_ignores_a_missing_temp_directory(self) -> None:
+        driver = self._driver()
+        driver._cwd = "/home/user"
+        command = driver._windows_launch("echo hello-from-vibe", "tag1")
+        self.assertNotIn('"', command)
+        self.assertIn("-EncodedCommand", command)
+        script = base64.b64decode(command.split()[-1]).decode("utf-16-le")
+        bat = _hosted_bat(script)
+        self.assertIn("echo hello-from-vibe", bat)
+        self.assertNotIn(r"C:\no\such\dir", script)
+        self.assertNotIn("/home/user", bat)
+
+        space = Path(tempfile.mkdtemp(prefix="vibe space "))
+        env = os.environ.copy()
+        env["TEMP"] = str(space)
+        env["TMP"] = str(space)
+        try:
+            completed = _run_windows(command, env)
+            text = _output_text(completed)
+            leftover = list(space.iterdir())
+        finally:
+            shutil.rmtree(space, ignore_errors=True)
+        self.assertNotIn("The system cannot find the path specified", text)
+        self.assertIn("hello-from-vibe", text)
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("__VIBE_CWD__", text)
+        self.assertEqual(leftover, [])
+
+    def test_next_command_starts_in_the_reported_directory(self) -> None:
+        driver = self._driver()
+        first = driver._windows_launch("cd /d C:\\Windows", "tag2")
+        completed = _run_windows(first, os.environ.copy())
+        text = _output_text(completed)
+        self.assertEqual(completed.returncode, 0, text)
+        marker = text.rfind("__VIBE_CWD__")
+        self.assertGreaterEqual(marker, 0, text)
+        reported = text[marker + len("__VIBE_CWD__"):].splitlines()[0].strip()
+        self.assertEqual(reported.upper(), r"C:\WINDOWS")
+        driver._cwd = reported
+        second = driver._windows_launch("cd", "tag3")
+        script = base64.b64decode(second.split()[-1]).decode("utf-16-le")
+        self.assertIn('@cd /d "' + reported + '"', _hosted_bat(script))
+        again = _run_windows(second, os.environ.copy())
+        body = _output_text(again).split("__VIBE_CWD__")[0]
+        self.assertIn(r"C:\Windows", body)
+
+    def test_failed_command_keeps_its_exit_code(self) -> None:
+        driver = self._driver()
+        command = driver._windows_launch("exit /b 7", "tag4")
+        completed = _run_windows(command, os.environ.copy())
+        text = _output_text(completed)
+        self.assertNotIn("The system cannot find the path specified", text)
+        self.assertEqual(completed.returncode, 7, text)
+
+
+def _hosted_bat(script: str) -> str:
+    marker = "FromBase64String('"
+    start = script.index(marker) + len(marker)
+    end = script.index("')", start)
+    return base64.b64decode(script[start:end]).decode("utf-8")
+
+
+def _run_windows(command: str, env: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["cmd.exe", "/d", "/s", "/c", command],
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+
+
+def _output_text(completed: subprocess.CompletedProcess) -> str:
+    return (
+        completed.stdout.decode("utf-8", errors="replace")
+        + completed.stderr.decode("utf-8", errors="replace")
+    )
 
 
 if __name__ == "__main__":
