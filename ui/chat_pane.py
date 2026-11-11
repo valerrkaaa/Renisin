@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from application.terminal_mcp import parse_call
 from screen_log import plain_terminal_text
 from ui.command_input import five_line_height, one_line_height
-from ui.fitted_text import FittedText, clamp_scroll_host
+from ui.fitted_text import FittedText, clamp_scroll_host, scroll_or_chain
 from ui.terminal_view import TerminalView
 
 _FENCE = re.compile(r"```([^\n`]*)\r?\n(.*?)```", re.DOTALL)
@@ -372,10 +372,16 @@ def command_rich_text(
 
 
 class _CaptureEdit(QPlainTextEdit):
-    """Поле вывода. Колесо крутит только его, в том числе у верхней границы."""
+    """Поле вывода. Колесо крутит его, пока текст не упёрся в край жеста.
+
+    Жест вверх, начатый уже у верхнего края, крутит ленту чата.
+    Жест, который только доехал до края, чат не двигает.
+    """
 
     def __init__(self) -> None:
         super().__init__()
+        self._wheel_at = 0.0
+        self._gesture_chains = False
         self.viewport().installEventFilter(self)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
@@ -388,16 +394,7 @@ class _CaptureEdit(QPlainTextEdit):
         return super().eventFilter(obj, event)
 
     def _scroll_wheel(self, event) -> None:
-        bar = self.verticalScrollBar()
-        delta = event.angleDelta().y()
-        pixels = event.pixelDelta().y()
-        if bar.maximum() > bar.minimum():
-            if delta:
-                steps = delta / 120.0
-                bar.setValue(int(bar.value() - steps * max(bar.singleStep(), 20) * 3))
-            elif pixels:
-                bar.setValue(bar.value() - pixels)
-        event.accept()
+        scroll_or_chain(self, event)
 
 
 class _CommandText(QTextEdit):
@@ -454,7 +451,8 @@ class _CommandText(QTextEdit):
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
             if self.verticalScrollBar().maximum() > 0:
-                return False
+                scroll_or_chain(self, event)
+                return True
             return _forward_wheel(self, event)
         return super().eventFilter(obj, event)
 
@@ -630,16 +628,12 @@ class _CommandRequest(QFrame):
         send.setObjectName("auxButton")
         send.setToolTip("Передать модели вывод команды")
         send.clicked.connect(self._send_output)
-        redact = QPushButton("Обезличить")
-        redact.setObjectName("auxButton")
-        redact.setToolTip("Разрешить правку вывода перед отправкой")
-        redact.clicked.connect(self._redact_output)
+        self._send_review = send
         review_reject = QPushButton("Отклонить по причине")
         review_reject.setObjectName("auxButton")
         review_reject.setToolTip("Отказать и передать модели причину")
         review_reject.clicked.connect(self._show_reason)
         review.addWidget(send)
-        review.addWidget(redact)
         review.addWidget(review_reject)
         review.addStretch(1)
         self._review_row = QWidget()
@@ -665,8 +659,9 @@ class _CommandRequest(QFrame):
         self._reason_row.setVisible(False)
         layout.addWidget(self._reason_row)
         self._approval = (run, edit, add_rule, explain)
-        self._review_buttons = (send, redact, review_reject, submit)
+        self._review_buttons = (send, review_reject, submit)
         self._buttons = self._approval + (submit,)
+        self._output.textChanged.connect(self._sync_send_label)
 
     def request_id(self) -> str:
         return self._request_id
@@ -720,6 +715,7 @@ class _CommandRequest(QFrame):
             code = FittedText(command_caption(self._command, parts), self._mono)
             code.setObjectName("shellCode")
             code.set_scroll_limit(_PREVIEW_LIMIT)
+            code.chain_scroll_at_edge()
             return code
         return _CommandText(self._mono, parts, spans)
 
@@ -847,15 +843,15 @@ class _CommandRequest(QFrame):
         shown = plain_terminal_text(output if output.strip() else model_text)
         self._captured = shown
         self._raw = shown
-        if not self._editable:
-            self._output.setPlainText(shown)
+        self._editable = True
+        self._output.setPlainText(shown)
         self._output.setVisible(True)
+        self._output.setReadOnly(False)
         self._title.setText("Подтверждение отправки")
         self.setProperty("review", "true")
         self.style().unpolish(self)
         self.style().polish(self)
-        if not self._editable:
-            self._output.setReadOnly(True)
+        self._sync_send_label()
         self._stdin.setVisible(False)
         self._stop.setVisible(False)
         self._screen.set_interactive(False)
@@ -865,11 +861,11 @@ class _CommandRequest(QFrame):
             button.setEnabled(True)
             button.show()
 
-    def _redact_output(self) -> None:
-        self._editable = True
-        self._output.setReadOnly(False)
-        self._output.setFocus()
-        self._review_buttons[1].hide()
+    def _sync_send_label(self) -> None:
+        changed = self._output.toPlainText() != self._captured
+        self._send_review.setText(
+            "Отправить изменённый ответ" if changed else "Отправить"
+        )
 
     def _send_output(self) -> None:
         text = self._output.toPlainText()
@@ -1041,7 +1037,8 @@ class ChatPane(QWidget):
         self._messages = QVBoxLayout(self._messages_host)
         self._messages.setContentsMargins(4, 4, 4, 8)
         self._messages.setSpacing(10)
-        self._messages.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._messages.setAlignment(Qt.AlignmentFlag.AlignBottom)
+        # Пустое место над сообщениями: короткая лента прижата к полю ввода.
         self._messages.addStretch(1)
         scroll.setWidget(self._messages_host)
         scroll.viewport().setAutoFillBackground(False)
@@ -1250,7 +1247,7 @@ class ChatPane(QWidget):
         card = self._request_card
         if card is not None:
             self._messages.removeWidget(card)
-            self._messages.insertWidget(self._messages.count() - 1, card)
+            self._messages.insertWidget(self._tail_index(), card)
         def settle() -> None:
             self._fit_bubbles()
             self._scroll_bottom()
@@ -1260,10 +1257,18 @@ class ChatPane(QWidget):
     def append_message(self, role: str, text: str) -> None:
         self._append(role, text)
 
-        def settle() -> None:
-            self._messages_host.setMinimumHeight(0)
-            self._fit_bubbles()
-            self._scroll_bottom()
+        def settle(repeat: bool = True) -> None:
+            try:
+                self._messages_host.setMinimumHeight(0)
+                self._fit_bubbles()
+                if self._request_card is not None:
+                    self._pin_command_request()
+                else:
+                    self._scroll_bottom()
+            except RuntimeError:
+                return
+            if repeat:
+                QTimer.singleShot(0, lambda: settle(False))
 
         QTimer.singleShot(0, settle)
 
@@ -1362,7 +1367,7 @@ class ChatPane(QWidget):
         )
         card.resized.connect(self.command_resized.emit)
         self._request_card = card
-        self._messages.insertWidget(self._messages.count() - 1, card)
+        self._messages.insertWidget(self._tail_index(), card)
         self.set_thinking(False)
         self.reveal_command_request()
 
@@ -1447,7 +1452,7 @@ class ChatPane(QWidget):
         if current is not None:
             self.clear_command_request()
         self._request_card = card
-        self._messages.insertWidget(self._messages.count() - 1, card)
+        self._messages.insertWidget(self._tail_index(), card)
         card.show()
         self.reveal_command_request()
 
@@ -1499,7 +1504,7 @@ class ChatPane(QWidget):
                 and self._messages.indexOf(self._thinking) >= 0
             )
             self._messages.removeWidget(self._thinking)
-            self._messages.insertWidget(self._messages.count() - 1, self._thinking)
+            self._messages.insertWidget(self._tail_index(self._request_card), self._thinking)
             self._thinking.setVisible(True)
             if not already:
                 self._thinking_phase = 0
@@ -1596,19 +1601,6 @@ class ChatPane(QWidget):
         widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self._insert_message(widget)
         return widget
-
-    def _scroll_widget_top(self, widget: QWidget) -> None:
-        try:
-            self._fit_bubbles()
-            self._messages.activate()
-            top = max(0, widget.y() - 4)
-            viewport_h = max(1, self._scroll.viewport().height())
-            self._messages_host.setMinimumHeight(top + viewport_h)
-            self._messages.activate()
-            bar = self._scroll.verticalScrollBar()
-            bar.setValue(min(bar.maximum(), top))
-        except RuntimeError:
-            return
 
     def _assistant_message(self, text: str) -> QWidget:
         parts = split_shell_blocks(text)
@@ -1736,38 +1728,56 @@ class ChatPane(QWidget):
             self._fit_again = False
             self._fit_bubbles()
 
+    def _tail_index(self, *stay_last: QWidget) -> int:
+        """Куда ставить следующий блок. Растяжка сверху не сдвигается."""
+        index = self._messages.count()
+        for widget in (self._thinking, self._request_card, *stay_last):
+            if widget is None:
+                continue
+            found = self._messages.indexOf(widget)
+            if found > 0:
+                index = min(index, found)
+        return index
+
     def _insert_message(self, widget: QWidget) -> None:
-        index = self._messages.count() - 1
-        thinking_index = self._messages.indexOf(self._thinking)
-        if thinking_index >= 0:
-            index = thinking_index
-        self._messages.insertWidget(index, widget)
+        # Запрос на команду остаётся последним. Иначе вывод следующей
+        # команды уезжает под него, а прокрутка вниз прячет одобрение.
+        self._messages.insertWidget(self._tail_index(), widget)
         QTimer.singleShot(0, self._fit_bubbles)
 
     def reveal_command_request(self) -> None:
-        """Держит верх блока запроса в поле зрения. Низ чата прячет сам блок."""
-        card = self._request_card
+        """Держит блок запроса у нижнего края. Верх — только если он выше экрана."""
 
         def go(repeat: bool = True) -> None:
-            try:
-                if card is None or card.isHidden():
-                    return
-                self._messages.activate()
-                top = max(0, card.y() - 4)
-                bar = self._scroll.verticalScrollBar()
-                bar.setValue(min(bar.maximum(), top))
-            except RuntimeError:
-                return
+            self._pin_command_request()
             if repeat:
                 QTimer.singleShot(0, lambda: go(False))
 
         QTimer.singleShot(0, go)
+
+    def _pin_command_request(self) -> None:
+        card = self._request_card
+        try:
+            if card is None or card.isHidden():
+                return
+            self._messages_host.setMinimumHeight(0)
+            self._messages.activate()
+            bar = self._scroll.verticalScrollBar()
+            view = max(1, self._scroll.viewport().height())
+            if card.height() >= view - 8:
+                top = max(0, card.y() - 4)
+                bar.setValue(min(bar.maximum(), top))
+                return
+            bar.setValue(bar.maximum())
+        except RuntimeError:
+            return
 
     def _scroll_bottom(self) -> None:
         """В самый низ. Второй проход ловит высоту, которая появляется после раскладки."""
 
         def go(repeat: bool = True) -> None:
             try:
+                self._messages_host.setMinimumHeight(0)
                 self._messages.activate()
                 bar = self._scroll.verticalScrollBar()
                 bar.setValue(bar.maximum())

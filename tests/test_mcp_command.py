@@ -1275,6 +1275,67 @@ class ChatCardTests(unittest.TestCase):
         self.assertEqual(labels[-1].text(), "Команда:\napt install\napt update")
         pane.close()
 
+    def test_later_output_keeps_the_approval_in_view(self) -> None:
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QApplication
+
+        from ui.chat_pane import ChatPane
+
+        pane = ChatPane(QFont("Consolas"))
+        pane.resize(420, 500)
+        pane.show()
+        QApplication.processEvents()
+        pane.append_message("user", "покажи хост")
+        pane.show_command_request("id-scroll", "имя машины", "hostname")
+        pane.append_message("assistant", "текст " * 80)
+        pane.append_message(
+            "result",
+            '{"status":"выполнено","command":"hostname","output":"'
+            + ("строка\\n" * 40)
+            + '"}',
+        )
+        for _ in range(8):
+            QApplication.processEvents()
+        card = pane._request_card
+        assert card is not None
+        widgets = [
+            pane._messages.itemAt(index).widget()
+            for index in range(pane._messages.count())
+        ]
+        shown = [widget for widget in widgets if widget is not None]
+        self.assertIs(shown[-1], card)
+        self.assertIsNone(widgets[0])
+        bar = pane._scroll.verticalScrollBar()
+        view = pane._scroll.viewport().height()
+        self.assertGreater(view, 80)
+        self.assertLess(card.y(), bar.value() + view)
+        self.assertGreaterEqual(card.y() + card.height(), bar.value() + view - 32)
+        pane.close()
+
+    def test_short_chat_sits_on_the_bottom(self) -> None:
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QApplication
+
+        from ui.chat_pane import ChatPane
+
+        pane = ChatPane(QFont("Consolas"))
+        pane.resize(420, 500)
+        pane.show()
+        pane.append_message("assistant", "ipconfig /all")
+        for _ in range(8):
+            QApplication.processEvents()
+        view = pane._scroll.viewport().height()
+        host = pane._messages_host
+        self.assertGreater(view, 200)
+        self.assertLessEqual(host.minimumHeight(), view)
+        texts = [
+            pane._messages.itemAt(index).widget()
+            for index in range(pane._messages.count())
+        ]
+        bubble = next(widget for widget in texts if widget is not None)
+        self.assertGreater(bubble.y() + bubble.height(), view - 48)
+        pane.close()
+
     def test_manual_approval_keeps_output_for_redaction(self) -> None:
         from PySide6.QtGui import QFont
         from PySide6.QtWidgets import QApplication, QFrame, QPlainTextEdit, QPushButton
@@ -1308,21 +1369,22 @@ class ChatCardTests(unittest.TestCase):
         QApplication.processEvents()
         edit = pane.findChild(QPlainTextEdit, "commandCapture")
         assert edit is not None
-        self.assertTrue(edit.isReadOnly())
+        self.assertFalse(edit.isReadOnly())
         self.assertIn("token=secret", edit.toPlainText())
         card = pane.findChild(QFrame, "commandRequest")
         assert card is not None
         card_buttons = {
             button.text(): button for button in card.findChildren(QPushButton)
         }
-        self.assertTrue(card_buttons["Отправить"].isEnabled())
-        self.assertTrue(card_buttons["Обезличить"].isVisible())
-        card_buttons["Обезличить"].click()
-        QApplication.processEvents()
-        self.assertFalse(edit.isReadOnly())
-        self.assertFalse(card_buttons["Обезличить"].isVisible())
+        self.assertNotIn("Обезличить", card_buttons)
+        send = card_buttons["Отправить"]
+        self.assertTrue(send.isEnabled())
         edit.setPlainText("token=\n")
-        card_buttons["Отправить"].click()
+        self.assertEqual(send.text(), "Отправить изменённый ответ")
+        edit.setPlainText("token=secret\n")
+        self.assertEqual(send.text(), "Отправить")
+        edit.setPlainText("token=\n")
+        send.click()
         self.assertEqual(delivered[0][0], "id-1")
         self.assertEqual(delivered[0][1], "token=\n")
         self.assertTrue(delivered[0][2])
@@ -2097,12 +2159,10 @@ class ChatCardTests(unittest.TestCase):
             False,
         )
         QApplication.sendEvent(capture.viewport(), event)
-        if not event.isAccepted():
-            QApplication.sendEvent(scroll.viewport(), event)
         QApplication.processEvents()
-        self.assertTrue(event.isAccepted())
         self.assertEqual(capture.verticalScrollBar().value(), 0)
-        self.assertEqual(scroll.verticalScrollBar().value(), 40)
+        self.assertLess(scroll.verticalScrollBar().value(), 40)
+        scroll.verticalScrollBar().setValue(40)
 
         bar = capture.verticalScrollBar()
         bar.setValue(max(1, bar.maximum() // 2))
@@ -2122,12 +2182,37 @@ class ChatCardTests(unittest.TestCase):
         self.assertGreater(bar.value(), before)
         self.assertEqual(scroll.verticalScrollBar().value(), 40)
 
+        bar.setValue(30)
+        scroll.verticalScrollBar().setValue(40)
+        capture._wheel_at = 0
+        arrived = QWheelEvent(
+            QPoint(12, 12),
+            capture.viewport().mapToGlobal(QPoint(12, 12)),
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(capture.viewport(), arrived)
+        self.assertEqual(bar.value(), 0)
+        self.assertEqual(scroll.verticalScrollBar().value(), 40)
+        QApplication.sendEvent(capture.viewport(), arrived)
+        self.assertEqual(bar.value(), 0)
+        self.assertEqual(scroll.verticalScrollBar().value(), 40)
+        capture._wheel_at = 0
+        QApplication.sendEvent(capture.viewport(), arrived)
+        self.assertEqual(bar.value(), 0)
+        self.assertLess(scroll.verticalScrollBar().value(), 40)
+
         short = _CommandRequest("id-short", "список", "ls", QFont("Consolas"), parts=("ls",))
         short.show_result("коротко", "выполнено", 0)
         layout.addWidget(short)
         QApplication.processEvents()
         quiet = short._output
         self.assertEqual(quiet.verticalScrollBar().maximum(), 0)
+        scroll.verticalScrollBar().setValue(40)
         quiet_event = QWheelEvent(
             QPoint(12, 12),
             quiet.viewport().mapToGlobal(QPoint(12, 12)),
@@ -2139,11 +2224,71 @@ class ChatCardTests(unittest.TestCase):
             False,
         )
         QApplication.sendEvent(quiet.viewport(), quiet_event)
-        if not quiet_event.isAccepted():
-            QApplication.sendEvent(scroll.viewport(), quiet_event)
         QApplication.processEvents()
-        self.assertTrue(quiet_event.isAccepted())
-        self.assertEqual(scroll.verticalScrollBar().value(), 40)
+        self.assertEqual(quiet.verticalScrollBar().value(), 0)
+        self.assertLess(scroll.verticalScrollBar().value(), 40)
+        scroll.close()
+
+    def test_command_preview_wheel_chains_only_from_the_top(self) -> None:
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtGui import QFont, QWheelEvent
+        from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget
+
+        from ui.chat_pane import _CommandRequest, _CommandText
+
+        class _Span:
+            def __init__(self, text: str) -> None:
+                self.text = text
+                self.matched = True
+
+        command = "\n".join(f"echo line-{index}" for index in range(80))
+        card = _CommandRequest(
+            "id-command", "длинная", command, QFont("Consolas"), parts=(command,)
+        )
+        spans = tuple((_Span(f"echo line-{index}"),) for index in range(80))
+        rich = _CommandText(QFont("Consolas"), (command,), spans)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.addWidget(card)
+        layout.addWidget(rich)
+        scroll = QScrollArea()
+        scroll.setWidget(host)
+        scroll.setWidgetResizable(True)
+        scroll.resize(420, 180)
+        host.setMinimumHeight(1400)
+        scroll.show()
+        QApplication.processEvents()
+        for block in (card._code, rich):
+            self.assertGreater(block.verticalScrollBar().maximum(), 0)
+            block.verticalScrollBar().setValue(0)
+            scroll.verticalScrollBar().setValue(40)
+            up = QWheelEvent(
+                QPoint(12, 12),
+                block.viewport().mapToGlobal(QPoint(12, 12)),
+                QPoint(0, 0),
+                QPoint(0, 120),
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.NoScrollPhase,
+                False,
+            )
+            QApplication.sendEvent(block.viewport(), up)
+            QApplication.processEvents()
+            self.assertEqual(block.verticalScrollBar().value(), 0)
+            self.assertLess(scroll.verticalScrollBar().value(), 40)
+
+            bar = block.verticalScrollBar()
+            bar.setValue(30)
+            scroll.verticalScrollBar().setValue(40)
+            block._wheel_at = 0
+            QApplication.sendEvent(block.viewport(), up)
+            self.assertEqual(bar.value(), 0)
+            self.assertEqual(scroll.verticalScrollBar().value(), 40)
+            QApplication.sendEvent(block.viewport(), up)
+            self.assertEqual(scroll.verticalScrollBar().value(), 40)
+            block._wheel_at = 0
+            QApplication.sendEvent(block.viewport(), up)
+            self.assertLess(scroll.verticalScrollBar().value(), 40)
         scroll.close()
 
     def test_edit_before_run_sends_the_changed_command_quietly(self) -> None:
