@@ -586,6 +586,20 @@ class McpCommandTests(unittest.TestCase):
         self.assertEqual(gate.asks[-1].origin_id, origin)
         self.assertEqual(gate.asks[-1].session_id, plain.session_id)
 
+    def test_single_ready_session_answers_without_foreground(self) -> None:
+        service, _driver, _profiles = _world()
+        info = service.create_session("без модели", "pw")
+        gate = _Gate(CommandAnswer("reject"))
+        service.set_command_approver(gate.ask)
+        result = service.run_foreground_mcp("посмотреть", "ls")
+        self.assertEqual(result, refusal())
+        self.assertEqual(gate.asks[-1].session_id, info.session_id)
+        service.create_session("вторая", "pw")
+        self.assertEqual(
+            service.run_foreground_mcp("посмотреть", "pwd"),
+            refusal_reason("нет активной сессии"),
+        )
+
     def test_removed_command_does_not_return(self) -> None:
         from PySide6.QtWidgets import QApplication
 
@@ -1697,12 +1711,20 @@ class ChatCardTests(unittest.TestCase):
         window.show()
         window._activate_session(info.session_id)
         QApplication.processEvents()
+        window._chat_panel_open = False
+        window._sync_chat(info.session_id)
+        QApplication.processEvents()
+        self.assertTrue(window.chat_pane.isHidden())
+        window._show_general_chat(info.session_id)
+        QApplication.processEvents()
+        self.assertIsNone(service._foreground)
         window._present_mcp((
             CommandAsk("no-model", info.session_id, "список", "ls"),
             lambda _answer: None,
         ))
         QApplication.processEvents()
         self.assertIn(info.session_id, window._mcp_pending)
+        self.assertFalse(window.chat_pane.isHidden())
         run = next(
             button
             for button in window.chat_pane.findChildren(QPushButton)

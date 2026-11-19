@@ -1789,11 +1789,19 @@ class ApplicationService:
         steps: tuple = (),
         alive: Optional[Callable[[], bool]] = None,
     ) -> str:
-        """Инструмент MCP: команда идёт в текущую активную сессию."""
+        """Инструмент MCP без id в адресе: активная сессия или единственный готовый терминал."""
         with self._lock:
             session_id = self._foreground
-        if not session_id:
-            return refusal_reason("нет активной сессии")
+        if not session_id or self.session_state(session_id) not in ("ready", "running"):
+            ready = [
+                info.session_id
+                for info in self.list_sessions()
+                if self.session_state(info.session_id) in ("ready", "running")
+            ]
+            if len(ready) == 1:
+                session_id = ready[0]
+            elif not session_id:
+                return refusal_reason("нет активной сессии")
         return self.run_mcp_command(
             session_id, intent, command, steps=steps, alive=alive
         )

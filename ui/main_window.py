@@ -3327,6 +3327,7 @@ class MainWindow(QMainWindow):
             ):
                 self._queue_pattern_run(prompt)
             return
+        self._chat_panel_open = True
         if focus and self._active_session_id != prompt.session_id:
             state = self._service.session_state(prompt.session_id)
             if state != "closed":
@@ -3465,13 +3466,23 @@ class MainWindow(QMainWindow):
         return None
 
     def _show_pending_mcp(self, session_id: Optional[domain.SessionId]) -> None:
-        if session_id is None or self.chat_pane.isHidden():
+        if session_id is None:
             return
         review = self._review_prompt(session_id)
+        item = self._mcp_pending.get(session_id)
+        if review is None and item is None:
+            if not self.chat_pane.isHidden():
+                self.chat_pane.clear_command_request()
+            return
+        if self.chat_pane.isHidden():
+            self._chat_panel_open = True
+            self.chat_pane.setVisible(True)
+            self._set_split_gap(True)
+            self._match_chat_column()
+            self._sync_panel_toggles()
         if review is not None:
             self._attach_parked(review.request_id)
             return
-        item = self._mcp_pending.get(session_id)
         if item is None:
             self.chat_pane.clear_command_request()
             return
