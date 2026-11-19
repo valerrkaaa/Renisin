@@ -10,15 +10,28 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 
-TOOL_NAME = "run_command"
+TOOL_NAME = "run_commands"
+LEGACY_TOOL_NAME = "run_command"
+
+
+def is_command_tool(name: str) -> bool:
+    """Новое имя инструмента и прежний run_command."""
+    return name in {TOOL_NAME, LEGACY_TOOL_NAME}
 
 # Длинный лог не должен целиком уходить в контекст модели.
 OUTPUT_CHAR_LIMIT = 4000
 
 TOOL_DESCRIPTION = (
-    "Самому выполнить одну команду в терминале этой сессии "
-    "и получить её вывод. Вызывай снова, пока не достигнет нужного результата. "
-    "Пользователь подтверждает команду в чате. "
+    "Выполнить команды в терминале этой сессии и получить их вывод. "
+    "Всегда передавай commands — массив, даже если команда одна. "
+    "В каждом пункте command — текст команды, description — зачем, что делает команда. "
+    "Команды идут по порядку. Пользователь подтверждает их одним разом. "
+    "Ответ — JSON-массив той же длины и в том же порядке. "
+    "В пункте command — первые 50 символов команды, чтобы понять, чей это вывод. "
+    "Если команда длиннее, после них стоит .... "
+    "В пункте result — вывод этой команды. "
+    "Если соединение оборвалось по лимиту времени, у ещё не завершённых пунктов "
+    "result равен Request timeout, уже выполненные сохраняют свой вывод. "
     "Пример для человека этим инструментом не показывай: пример — это блок кода в тексте. "
     "Нельзя вызывать интерактивные команды: nano, vim, vi, less, more, top, htop, man "
     "и любые программы, которые открывают интерактивный экран и ждут ввод. "
@@ -27,6 +40,9 @@ TOOL_DESCRIPTION = (
     "Длинный вывод обрезается: в конце будет пометка, что ответ урезан "
     "из-за большого числа символов."
 )
+
+REQUEST_TIMEOUT = "Request timeout"
+COMMAND_LABEL_LIMIT = 50
 
 INTERACTIVE_REASON = "MCP не поддерживает интерактивные сессии"
 
@@ -60,6 +76,10 @@ class CommandAsk:
     parts: tuple = ()
     # Строки подтверждения, разрезанные на команды и операторы.
     spans: tuple = ()
+    # Пункты commands. Пусто — одна команда из поля command.
+    steps: tuple = ()
+    # Клиент MCP ещё на связи. None — проверка не нужна.
+    alive: object = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +95,8 @@ class CommandAnswer:
     # Если не пусто, в терминал уходит эта строка, а не исходный вызов.
     # Модели об этом не сообщается.
     command: str = ""
+    # Несколько команд после правки. Пусто — выполняется command или исходный вызов.
+    commands: tuple = ()
 
 
 def normalize_command(command: str) -> str:
@@ -304,6 +326,62 @@ def _read_heredoc_opener(text: str, start: int):
     return token, strip_tabs, index
 
 
+@dataclass(frozen=True)
+class CommandStep:
+    command: str
+    description: str = ""
+
+
+def command_label(command: str, limit: int = COMMAND_LABEL_LIMIT) -> str:
+    """Первые символы команды, чтобы в ответе было видно, чей это вывод."""
+    text = normalize_command(command).replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def format_command_results(rows: Tuple[Tuple[str, str], ...] | list) -> str:
+    """Массив той же длины и в том же порядке, что и команды."""
+    payload = [
+        {"command": command_label(command), "result": result}
+        for command, result in rows
+    ]
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def parse_command_steps(arguments: object) -> Tuple[CommandStep, ...]:
+    """Команды из вызова. Старая одиночная строка становится массивом из одного пункта."""
+    if not isinstance(arguments, dict):
+        return ()
+    raw = arguments.get("commands")
+    steps: list = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                text = normalize_command(item)
+                if text:
+                    steps.append(CommandStep(text, ""))
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = normalize_command(
+                str(item.get("command") or item.get("cmd") or "")
+            )
+            if not text:
+                continue
+            description = " ".join(
+                str(item.get("description") or item.get("intent") or "").split()
+            )
+            steps.append(CommandStep(text, description))
+    if steps:
+        return tuple(steps)
+    text = command_text(arguments)
+    if not text:
+        return ()
+    intent = " ".join(str(arguments.get("intent") or "").split())
+    return (CommandStep(text, intent),)
+
+
 def command_text(arguments: object) -> str:
     """Текст команды из аргументов инструмента. Модели называют поле по-разному."""
     if not isinstance(arguments, dict):
@@ -375,16 +453,30 @@ def input_schema() -> dict:
     return {
         "type": "object",
         "properties": {
-            "intent": {
-                "type": "string",
-                "description": "Намерение: что этой командой нужно сделать",
-            },
-            "command": {
-                "type": "string",
-                "description": "Текст команды для терминала",
+            "commands": {
+                "type": "array",
+                "minItems": 1,
+                "description": (
+                    "Команды по порядку. Даже одна команда передаётся "
+                    "массивом из одного пункта."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Зачем, что делает команда",
+                        },
+                        "command": {
+                            "type": "string",
+                            "description": "Текст команды для терминала",
+                        },
+                    },
+                    "required": ["command"],
+                },
             },
         },
-        "required": ["intent", "command"],
+        "required": ["commands"],
     }
 
 
@@ -455,7 +547,7 @@ def lounge_tools(
     os_by_name: Optional[dict] = None,
     shell_by_name: Optional[dict] = None,
 ) -> list:
-    """Тот же run_command, но с именем MCP и его ОС."""
+    """Тот же run_commands, но с именем MCP и его ОС."""
     shown = ", ".join(names) if names else "нет подключённых MCP"
     schema = input_schema()
     properties = dict(schema["properties"])
@@ -497,7 +589,7 @@ def lounge_tools(
                 "parameters": {
                     "type": "object",
                     "properties": properties,
-                    "required": ["intent", "command", "target"],
+                    "required": ["commands", "target"],
                 },
             },
         }
@@ -517,12 +609,12 @@ _TOOL_TAG = re.compile(
     r"<(?:tool_call|function_call)>\s*(.*?)\s*</(?:tool_call|function_call)>",
     re.DOTALL | re.IGNORECASE,
 )
-_PY_CALL = re.compile(r"run_command\s*\((.*?)\)", re.DOTALL | re.IGNORECASE)
+_PY_CALL = re.compile(r"run_commands?\s*\((.*?)\)", re.DOTALL | re.IGNORECASE)
 _KWARG = re.compile(
-    r"(?i)\b(intent|command|target)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
+    r"(?i)\b(intent|command|target|description)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
 )
 _QWEN = re.compile(
-    r"<function=run_command>\s*(.*?)\s*</function>",
+    r"<function=run_commands?>\s*(.*?)\s*</function>",
     re.DOTALL | re.IGNORECASE,
 )
 _PARAM = re.compile(
@@ -532,7 +624,7 @@ _PARAM = re.compile(
 
 
 def promote_shell_actions(text: str) -> Tuple[str, List[ParsedCall]]:
-    """Забрать текстовую запись run_command. Блок кода остаётся текстом для человека."""
+    """Забрать текстовую запись run_commands. Блок кода остаётся текстом для человека."""
     cleaned, calls = _markup_calls(text)
     return _tidy(cleaned), calls
 
@@ -597,13 +689,21 @@ def _call_from_mapping(data: dict, index: int) -> Optional[ParsedCall]:
             arguments = None
     if not isinstance(arguments, dict):
         arguments = data
-    if name and name != TOOL_NAME:
+    if name and not is_command_tool(name):
         return None
-    command = str(arguments.get("command") or "")
-    if not normalize_command(command):
+    steps = parse_command_steps(arguments)
+    if not steps:
         return None
-    intent = str(arguments.get("intent") or "").strip() or "выполнить команду"
-    payload = {"intent": intent, "command": command}
+    payload = {
+        "commands": [
+            {"description": step.description, "command": step.command}
+            for step in steps
+        ]
+    }
+    if len(steps) == 1:
+        payload["command"] = steps[0].command
+        if steps[0].description:
+            payload["intent"] = steps[0].description
     target = str(arguments.get("target") or "").strip()
     if target:
         payload["target"] = target

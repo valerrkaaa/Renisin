@@ -1,11 +1,12 @@
 # Copyright (c) 2026 Valery Andreevich Glushchenko. Dual-licensed under AGPL-3.0 and Commercial License.
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-"""Локальный MCP-сервер: инструмент run_command для активной сессии терминала."""
+"""Локальный MCP-сервер: инструмент run_commands для активной сессии терминала."""
 from __future__ import annotations
 
 import ipaddress
 import json
+import select
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,7 +16,9 @@ from application.terminal_mcp import (
     TOOL_DESCRIPTION,
     TOOL_NAME,
     input_schema,
+    is_command_tool,
     os_command_note,
+    parse_command_steps,
 )
 
 
@@ -181,7 +184,11 @@ def _handler_class(service):
                 self.end_headers()
                 return
             result, error = _dispatch(
-                service, method, message.get("params"), _session_from_path(self.path)
+                service,
+                method,
+                message.get("params"),
+                _session_from_path(self.path),
+                lambda: not _peer_closed(self.connection),
             )
             if error is not None:
                 self._send(200, _error(message.get("id"), error[0], error[1]))
@@ -219,7 +226,22 @@ def _session_from_path(path: str) -> Optional[str]:
     return session_id
 
 
-def _dispatch(service, method: str, params, session_id: Optional[str]) -> tuple:
+def _peer_closed(conn) -> bool:
+    """Клиент закрыл сокет, пока сервер ещё выполняет вызов."""
+    try:
+        ready, _, _ = select.select([conn], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    if not ready:
+        return False
+    try:
+        piece = conn.recv(1, socket.MSG_PEEK)
+    except OSError:
+        return True
+    return piece == b""
+
+
+def _dispatch(service, method: str, params, session_id: Optional[str], alive=None) -> tuple:
     if not isinstance(params, dict):
         params = {}
     if method == "initialize":
@@ -234,7 +256,7 @@ def _dispatch(service, method: str, params, session_id: Optional[str]) -> tuple:
         return (
             {
                 "protocolVersion": version,
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": {"tools": {"listChanged": True}},
                 "serverInfo": {"name": name, "version": "1.0.0"},
             },
             None,
@@ -262,25 +284,35 @@ def _dispatch(service, method: str, params, session_id: Optional[str]) -> tuple:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 arguments = None
-        if name != TOOL_NAME or not isinstance(arguments, dict):
+        steps = parse_command_steps(arguments)
+        if not is_command_tool(name) or not isinstance(arguments, dict) or not steps:
             return (
                 {
                     "content": [
                         {
                             "type": "text",
-                            "text": "отказ, причина: нужны поля intent и command",
+                            "text": "отказ, причина: нужно поле commands",
                         }
                     ],
                     "isError": False,
                 },
                 None,
             )
-        intent = str(arguments.get("intent") or "")
-        command = str(arguments.get("command") or "")
+        intent = steps[0].description or str(arguments.get("intent") or "")
         if session_id:
-            text = service.run_mcp_command(session_id, intent, command)
+            text = service.run_mcp_command(
+                session_id,
+                intent,
+                steps[0].command,
+                steps=steps,
+                alive=alive,
+            )
         else:
-            text = service.run_foreground_mcp(intent, command)
+            runner = getattr(service, "run_foreground_mcp", None)
+            if not callable(runner):
+                text = "отказ, причина: нет активной сессии"
+            else:
+                text = runner(intent, steps[0].command, steps=steps, alive=alive)
         return ({"content": [{"type": "text", "text": text}], "isError": False}, None)
     return (None, (-32601, f"Method not found: {method}"))
 

@@ -57,10 +57,13 @@ from application import ApplicationService
 from application.service import LlmUnavailable, SessionUnavailable
 from application.command_rules import fully_allowed
 from application.terminal_mcp import (
+    REQUEST_TIMEOUT,
     CommandAnswer,
     CommandAsk,
+    CommandStep,
     call_record,
     finished_text,
+    format_command_results,
     lounge_tab_id,
     normalize_command,
 )
@@ -587,6 +590,8 @@ class MainWindow(QMainWindow):
     _lounge_done = Signal(str, object)
     _mcp_ask = Signal(object)
     _review_done = Signal(str, str, str, object)
+    _review_step = Signal(str, int)
+    _review_batch = Signal(str, object)
 
     def __init__(self, service: ApplicationService) -> None:
         super().__init__()
@@ -602,6 +607,7 @@ class MainWindow(QMainWindow):
         self._mcp_hold: Set[str] = set()
         self._mcp_order: List[str] = []
         self._reviewing: Dict[str, tuple] = {}
+        self._step_gates: Dict[str, threading.Event] = {}
         self._parked_cards: Dict[str, object] = {}
         self._review_commands: Dict[str, str] = {}
         self._hidden_terminal: Set[domain.SessionId] = set()
@@ -624,6 +630,8 @@ class MainWindow(QMainWindow):
         self._chat_done.connect(self._on_chat_done)
         self._mcp_ask.connect(self._present_mcp)
         self._review_done.connect(self._on_review_done)
+        self._review_step.connect(self._on_review_step)
+        self._review_batch.connect(self._on_review_batch)
         self.chat_pane.command_decided.connect(self._on_command_decided)
         self.chat_pane.output_decided.connect(self._on_output_decided)
         self.chat_pane.command_input.connect(self._on_review_input)
@@ -3316,6 +3324,7 @@ class MainWindow(QMainWindow):
                 info.mcp_alias.strip() or info.name,
                 prompt.parts,
                 prompt.spans,
+                prompt.steps,
             )
             if (
                 self._active_session_id == GENERAL_CHAT_ID
@@ -3480,6 +3489,7 @@ class MainWindow(QMainWindow):
             prompt.command,
             prompt.parts,
             prompt.spans,
+            prompt.steps,
         )
         self._queue_pattern_run(prompt)
 
@@ -3572,9 +3582,30 @@ class MainWindow(QMainWindow):
         if found is None:
             return
         prompt = found[0]
-        edited = self._edited_command_text(prompt.request_id)
-        if edited:
-            prompt = replace(prompt, command=normalize_command(edited))
+        commands = self._edited_commands(prompt.request_id)
+        if commands:
+            if len(commands) == 1:
+                description = prompt.steps[0].description if prompt.steps else prompt.intent
+                updated = (CommandStep(normalize_command(commands[0]), description),)
+                prompt = replace(
+                    prompt,
+                    command=normalize_command(commands[0]),
+                    steps=updated if prompt.steps else (),
+                )
+            else:
+                prompt = replace(
+                    prompt,
+                    steps=tuple(
+                        CommandStep(
+                            normalize_command(item),
+                            prompt.steps[index].description
+                            if index < len(prompt.steps)
+                            else "",
+                        )
+                        for index, item in enumerate(commands)
+                        if normalize_command(item)
+                    ),
+                )
             found = (prompt, found[1])
         if (
             action == "run"
@@ -3587,6 +3618,7 @@ class MainWindow(QMainWindow):
             self._hidden_terminal.add(prompt.session_id)
             self.chat_pane.show_command_running(request_id)
             self._start_command_review(prompt)
+            self._arm_peer_watch(request_id)
             return
         if action in ("run", "always"):
             self._hidden_terminal.add(prompt.session_id)
@@ -3599,8 +3631,15 @@ class MainWindow(QMainWindow):
         if action not in ("run", "always"):
             self._record_tool_outcome(prompt, action, reason)
         answer = CommandAnswer(action, reason)
-        if action in ("run", "always") and edited:
-            answer = CommandAnswer(action, reason, command=prompt.command)
+        if action in ("run", "always") and commands:
+            if len(commands) == 1:
+                answer = CommandAnswer(action, reason, command=prompt.command)
+            else:
+                answer = CommandAnswer(
+                    action,
+                    reason,
+                    commands=tuple(step.command for step in prompt.steps),
+                )
         found[1](answer)
         self._advance_mcp(pending_key, prompt.request_id)
         if (
@@ -3612,20 +3651,116 @@ class MainWindow(QMainWindow):
     def _start_command_review(self, prompt: CommandAsk) -> None:
         request_id = prompt.request_id
         session_id = prompt.session_id
-        command = prompt.command
+        steps = tuple(prompt.steps) or (CommandStep(prompt.command, prompt.intent),)
+        alive = prompt.alive if callable(prompt.alive) else None
+        gate = threading.Event()
+        self._step_gates[request_id] = gate
 
         def work() -> None:
-            try:
-                model_text, output, code = self._service.capture_mcp_output(
-                    session_id, command, interactive_ok=True
-                )
-            except Exception as exc:
-                model_text = str(exc) or "не удалось выполнить команду"
-                output = ""
-                code = None
-            self._review_done.emit(request_id, model_text, output, code)
+            if len(steps) == 1 and alive is None:
+                command = steps[0].command
+                try:
+                    model_text, output, code = self._service.capture_mcp_output(
+                        session_id, command, interactive_ok=True
+                    )
+                except Exception as exc:
+                    model_text = str(exc) or "не удалось выполнить команду"
+                    output = ""
+                    code = None
+                self._review_done.emit(request_id, model_text, output, code)
+                return
+            rows = []
+            stopped = False
+            for index, step in enumerate(steps):
+                if stopped or (alive is not None and not alive()):
+                    rows.append((step.command, "", REQUEST_TIMEOUT, None))
+                    stopped = True
+                    continue
+                gate.clear()
+                self._review_step.emit(request_id, index)
+                gate.wait(3)
+                try:
+                    model_text, output, code = self._service.capture_mcp_output(
+                        session_id,
+                        step.command,
+                        interactive_ok=True,
+                        alive=alive,
+                    )
+                except Exception as exc:
+                    model_text = str(exc) or "не удалось выполнить команду"
+                    output = ""
+                    code = None
+                if model_text == REQUEST_TIMEOUT:
+                    rows.append((step.command, "", REQUEST_TIMEOUT, None))
+                    stopped = True
+                    continue
+                rows.append((step.command, output, model_text, code))
+            self._review_batch.emit(request_id, rows)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _arm_peer_watch(self, request_id: str) -> None:
+        def tick() -> None:
+            found = self._reviewing.get(request_id)
+            if found is None:
+                return
+            alive = found[0].alive
+            if not callable(alive) or alive():
+                QTimer.singleShot(300, tick)
+                return
+            card = self._command_card(request_id)
+            if card is not None and getattr(card, "_settled", False):
+                card._send_output()
+                return
+            QTimer.singleShot(300, tick)
+
+        QTimer.singleShot(300, tick)
+
+    def _on_review_step(self, request_id: str, index: int) -> None:
+        self._review_commands.pop(request_id, None)
+        card = self._command_card(request_id)
+        if card is not None:
+            card.begin_step(index)
+        gate = self._step_gates.get(request_id)
+        if gate is not None:
+            gate.set()
+
+    def _on_review_batch(self, request_id: str, rows: object) -> None:
+        if request_id not in self._reviewing:
+            return
+        items = list(rows or [])
+        if any(len(item) > 2 and item[2] == REQUEST_TIMEOUT for item in items):
+            self._deliver_rows(request_id, items)
+            return
+        card = self._command_card(request_id)
+        if card is None:
+            self._deliver_rows(request_id, items)
+            return
+        card.show_step_results(items)
+
+    def _deliver_rows(self, request_id: str, rows: object) -> None:
+        pairs = []
+        for row in list(rows or []):
+            command = str(row[0])
+            output = str(row[1]) if len(row) > 1 else ""
+            model_text = str(row[2]) if len(row) > 2 else ""
+            result = model_text if model_text.strip() else output
+            pairs.append((command, result))
+        body = format_command_results(pairs)
+        self._on_output_decided(request_id, body, False, body, None)
+
+    def _edited_commands(self, request_id: str):
+        for pane in (self.chat_pane, self._lounge):
+            reader = getattr(pane, "edited_commands", None)
+            if not callable(reader):
+                continue
+            found = reader(request_id)
+            if found:
+                return found
+        text = self._edited_command_text(request_id)
+        if text is None:
+            return None
+        return (text,)
 
     def _model_terminal_event(self, event: domain.TranscriptEvent) -> bool:
         """Команда модели не занимает ленту. Команда пользователя остаётся в ней."""
@@ -3659,10 +3794,8 @@ class MainWindow(QMainWindow):
             return
         known = self._review_commands.get(request_id)
         if event.command_id:
-            if known is None:
+            if known != event.command_id:
                 self._review_commands[request_id] = event.command_id
-            elif event.command_id != known:
-                return
         elif known is not None:
             return
         card = self._command_card(request_id)
@@ -3678,7 +3811,7 @@ class MainWindow(QMainWindow):
                 )
             else:
                 card.note_output(event.payload, event.persist)
-                if _asks_for_secret(event.payload):
+                if _asks_for_secret(card._live):
                     card.offer_secret()
         elif event.event_type == domain.EventType.ERROR and event.payload:
             card.note_output(event.payload + "\n", False)
@@ -3740,17 +3873,29 @@ class MainWindow(QMainWindow):
         pending_key = self._mcp_key(prompt)
         self._mcp_hold.discard(pending_key)
         self._review_commands.pop(request_id, None)
+        self._step_gates.pop(request_id, None)
         self._hidden_terminal.discard(prompt.session_id)
         self._hide_request(prompt)
-        if edited:
+        if str(model_text).lstrip().startswith("["):
+            body = text
+            if edited:
+                body = (
+                    "данные отредактированы пользователем, вероятно чтобы скрыть "
+                    "чувствительные данные\n"
+                    + text
+                )
+        elif edited:
             exit_code = code if isinstance(code, int) or code is None else None
             body = (
                 "данные отредактированы пользователем, вероятно чтобы скрыть "
                 "чувствительные данные\n"
                 + finished_text(exit_code, text)
             )
+            command = prompt.steps[0].command if prompt.steps else prompt.command
+            body = format_command_results([(command, body)])
         else:
-            body = model_text
+            command = prompt.steps[0].command if prompt.steps else prompt.command
+            body = format_command_results([(command, model_text)])
         status = "отказ" if str(model_text).strip().startswith("отказ") else "выполнено"
         if status == "отказ":
             shown = model_text

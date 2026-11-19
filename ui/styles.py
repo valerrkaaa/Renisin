@@ -476,8 +476,7 @@ QPlainTextEdit#commandCapture, QPlainTextEdit#commandEdit {{
     color: {MUTED};
     border: none;
     border-radius: {RADIUS}px;
-    padding: 6px 8px;
-    font-size: 11px;
+    padding: 0;
 }}
 QPlainTextEdit#commandCapture:disabled, QPlainTextEdit#commandEdit:disabled {{
     background: {ACTIVITY};
@@ -811,16 +810,6 @@ QTextEdit#shellCodeRich {{
     selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
-QFrame#commandRequest QLabel#shellCode,
-QFrame#commandRequest QTextEdit#shellCode {{
-    color: {TEXT};
-    background: {ACTIVITY};
-    border: none;
-    border-radius: {RADIUS}px;
-    padding: 6px 8px;
-    selection-background-color: {ACCENT};
-    selection-color: #ffffff;
-}}
 QLabel#shellCode, QTextEdit#shellCode {{
     color: {TEXT};
     background: transparent;
@@ -829,6 +818,27 @@ QLabel#shellCode, QTextEdit#shellCode {{
     selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
+QFrame#commandRequest QLabel#shellCode,
+QFrame#commandRequest QTextEdit#shellCode,
+QFrame#commandRequest QTextEdit#shellCodeRich,
+QFrame#commandRequest QPlainTextEdit#commandEdit,
+QFrame#commandRequest QPlainTextEdit#commandCapture {{
+    color: {TEXT};
+    background: {ACTIVITY};
+    border: none;
+    border-radius: {RADIUS}px;
+    padding: 0;
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
+}}
+QFrame#commandRequest QTextEdit#shellCode QWidget,
+QFrame#commandRequest QTextEdit#shellCodeRich QWidget,
+QFrame#commandRequest QPlainTextEdit#commandEdit QWidget,
+QFrame#commandRequest QPlainTextEdit#commandCapture QWidget {{
+    background: transparent;
+    border: none;
+    color: {TEXT};
+}}
 QFrame#commandRequest {{
     background: {SURFACE};
     border: 1px solid {BORDER};
@@ -836,6 +846,35 @@ QFrame#commandRequest {{
 }}
 QFrame#commandRequest[review="true"] {{
     border: 1px solid {ACCENT};
+}}
+QFrame#commandStep {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QLabel#commandMeta, QLabel#commandHint {{
+    color: {MUTED};
+    font-size: 11px;
+}}
+QLabel#commandStepIndex, QLabel#commandPrompt {{
+    color: {FAINT};
+}}
+QWidget#commandCmd {{
+    background: {ACTIVITY};
+    border-radius: {RADIUS}px;
+}}
+QFrame#commandOutRail {{
+    background: transparent;
+    border: none;
+    border-left: 1px solid {BORDER};
+}}
+QFrame#commandRequest QPlainTextEdit#commandCapture {{
+    background: #1a1b1f;
+    color: #c9cad3;
+}}
+QFrame#commandRequest QPlainTextEdit#commandEdit {{
+    background: transparent;
+    color: {TEXT};
 }}
 QFrame#chatHead {{
     background: {SURFACE};

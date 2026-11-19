@@ -23,8 +23,10 @@ from application.master_password import MasterPassword
 from application.terminal_mcp import (
     TOOL_NAME,
     INTERACTIVE_REASON,
+    is_command_tool,
     CommandAnswer,
     CommandAsk,
+    CommandStep,
     call_record,
     finished_text,
     lounge_origin,
@@ -34,11 +36,13 @@ from application.terminal_mcp import (
     normalize_command,
     openai_tools,
     shell_command_note,
-    command_text,
+    format_command_results,
+    parse_command_steps,
     split_shell_commands,
     promote_shell_actions,
     refusal,
     refusal_reason,
+    REQUEST_TIMEOUT,
 )
 from application.ports import (
     DriverFactory,
@@ -77,12 +81,12 @@ ls -la
 ```
 Поясняющий код на другом языке оформляй так же, со своим языком блока.
 
-Сделать самому. Результат нужно получить из терминала. Не оформляй команду блоком. Вызывай инструмент run_command и продолжай, пока не достигнешь результата, которого просили. По одному вызову — одна команда. intent — зачем она нужна, command — её текст. Прочитай ответ инструмента и, если цели ещё нет, вызови следующую команду. Когда данных достаточно, ответь обычным текстом по этому выводу.
+Сделать самому. Результат нужно получить из терминала. Не оформляй команду блоком. Вызывай инструмент run_commands и продолжай, пока не достигнешь результата, которого просили. Поле commands — массив, даже для одной команды. В пункте description — зачем, что делает команда, command — её текст. Прочитай ответ инструмента и, если цели ещё нет, вызови следующие команды. Когда данных достаточно, ответь обычным текстом по этому выводу.
 Нельзя вызывать интерактивные команды: nano, vim, vi, less, more, top, htop, man. MCP их не поддерживает.
 
-Не смешивай режимы: показанная команда остаётся текстом, выполненная приходит только из run_command.
+Не смешивай режимы: показанная команда остаётся текстом, выполненная приходит только из run_commands.
 
-Замена текста в файле — блок edit, не команда и не run_command. OLD копируй из файла как есть, вместе с соседними строками, чтобы кусок был один на весь файл.
+Замена текста в файле — блок edit, не команда и не run_commands. OLD копируй из файла как есть, вместе с соседними строками, чтобы кусок был один на весь файл.
 ```edit
 path: путь/файл
 OLD:
@@ -101,9 +105,9 @@ _LOUNGE_SYSTEM_PROMPT = """Ты помощник в общем чате. К не
 ls -la
 ```
 
-Сделать самому. Результат нужно получить из терминала. Вызывай run_command и продолжай, пока не достигнешь результата. По одному вызову — одна команда. intent — зачем она нужна, command — её текст, target — точное имя MCP из списка ниже. Прочитай ответ инструмента. Когда данных достаточно, ответь обычным текстом.
+Сделать самому. Результат нужно получить из терминала. Вызывай run_commands и продолжай, пока не достигнешь результата. Поле commands — массив, даже для одной команды. В пункте description — зачем, что делает команда, command — её текст, target — точное имя MCP из списка ниже. Прочитай ответ инструмента. Когда данных достаточно, ответь обычным текстом.
 Нельзя вызывать интерактивные команды: nano, vim, vi, less, more, top, htop, man. MCP их не поддерживает.
-Не смешивай режимы: показанная команда остаётся текстом, выполненная приходит только из run_command.
+Не смешивай режимы: показанная команда остаётся текстом, выполненная приходит только из run_commands.
 
 У каждого MCP своя операционная система. Она указана в списке ниже и в цитате, если пользователь вставил «MCP: имя». Команду пиши для ОС того MCP, куда она уйдёт. Не переноси синтаксис одной ОС на другую. Если у MCP указано «ОС не определена», не выбирай Windows или Linux наугад: сначала короткой командой узнай ОС в этом MCP или спроси.
 """
@@ -1778,13 +1782,21 @@ class ApplicationService:
             return ""
         return f"{base.rstrip('/')}/{session_id}"
 
-    def run_foreground_mcp(self, intent: str, command: str) -> str:
+    def run_foreground_mcp(
+        self,
+        intent: str,
+        command: str,
+        steps: tuple = (),
+        alive: Optional[Callable[[], bool]] = None,
+    ) -> str:
         """Инструмент MCP: команда идёт в текущую активную сессию."""
         with self._lock:
             session_id = self._foreground
         if not session_id:
             return refusal_reason("нет активной сессии")
-        return self.run_mcp_command(session_id, intent, command)
+        return self.run_mcp_command(
+            session_id, intent, command, steps=steps, alive=alive
+        )
 
     def run_mcp_command(
         self,
@@ -1792,9 +1804,13 @@ class ApplicationService:
         intent: str,
         command: str,
         origin_id: str = "",
+        steps: tuple = (),
+        alive: Optional[Callable[[], bool]] = None,
     ) -> str:
         """Спросить подтверждение в чате-источнике и выполнить команду в терминале."""
-        return self._run_mcp_command(session_id, intent, command, origin_id)
+        return self._run_mcp_command(
+            session_id, intent, command, origin_id, steps, alive
+        )
 
     def send_chat(self, session_id: domain.SessionId, text: str) -> None:
         """Пишет сообщение в журнал и запрашивает ответ только по переписке."""
@@ -1957,7 +1973,7 @@ class ApplicationService:
                     and not promise_nudged
                     and _promises_action(content)
                 ):
-                    # «Сейчас проверю» без run_command — ход ещё не закончен.
+                    # «Сейчас проверю» без run_commands — ход ещё не закончен.
                     promise_nudged = True
                     self._ask_for_tool(messages, content)
                     continue
@@ -2017,12 +2033,12 @@ class ApplicationService:
             note = (
                 "Ответ оборвался по лимиту длины, генерация на сервере остановилась. "
                 "Продолжи с места обрыва и не повторяй уже написанное. "
-                "Если нужна команда, вызови run_command целиком, одним вызовом."
+                "Если нужна команда, вызови run_commands целиком, одним вызовом."
             )
         else:
             note = (
                 "Вызов инструмента пришёл повреждённым и не выполнялся. "
-                "Повтори run_command целиком или ответь текстом."
+                "Повтори run_commands целиком или ответь текстом."
             )
         messages.append({"role": "user", "content": note})
 
@@ -2033,10 +2049,10 @@ class ApplicationService:
             {
                 "role": "user",
                 "content": (
-                    "Инструмент run_command не вызван, команда не запускалась "
+                    "Инструмент run_commands не вызван, команда не запускалась "
                     "и окно подтверждения не открывалось. Блок ```bash сам не "
                     "выполняется. Если нужна проверка в терминале — вызови "
-                    "run_command сейчас, одним целым вызовом. Если команда не "
+                    "run_commands сейчас, одним целым вызовом. Если команда не "
                     "нужна — ответь по сути и не пиши, что сейчас проверишь."
                 ),
             }
@@ -2101,22 +2117,23 @@ class ApplicationService:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 return refusal_reason("не удалось прочитать аргументы")
-        if name != TOOL_NAME or not isinstance(arguments, dict):
+        if not is_command_tool(name) or not isinstance(arguments, dict):
             raise ConnectionError(
                 "Модель вызвала инструмент "
                 f"«{name or 'без имени'}», а не {TOOL_NAME}. "
                 "Окно подтверждения команды не открывалось."
             )
-        command = command_text(arguments)
-        if not command:
+        steps = parse_command_steps(arguments)
+        if not steps:
             raise ConnectionError(
-                "Модель вызвала run_command без текста команды. "
+                "Модель вызвала run_commands без текста команды. "
                 "Окно подтверждения не открывалось."
             )
         return self.run_mcp_command(
             session_id,
-            str(arguments.get("intent") or ""),
-            command,
+            steps[0].description or str(arguments.get("intent") or ""),
+            steps[0].command,
+            steps=steps,
         )
 
     def command_rule_lists(self) -> dict:
@@ -2160,12 +2177,19 @@ class ApplicationService:
         intent: str,
         command: str,
         origin_id: str = "",
+        steps: tuple = (),
+        alive: Optional[Callable[[], bool]] = None,
     ) -> str:
-        text = normalize_command(command)
-        why = " ".join(intent.split()) or "выполнить команду"
+        parsed = tuple(steps)
+        if not parsed:
+            text = normalize_command(command)
+            if not text:
+                return refusal_reason("пустая команда")
+            parsed = (CommandStep(text, " ".join(intent.split())),)
+        else:
+            text = parsed[0].command
+        why = parsed[0].description or " ".join(intent.split()) or "выполнить команду"
         origin = origin_id.strip()
-        if not text:
-            return refusal_reason("пустая команда")
         info = self.get_session(session_id)
         if info is None:
             return refusal_reason("сессия не найдена")
@@ -2175,10 +2199,18 @@ class ApplicationService:
             return refusal_reason("сессия не готова принять команду")
         allow = self._command_allow
         tab = lounge_tab_id(origin)
-        if allow is not None and allow.allows(session_id, text):
-            return self._execute_mcp_command(session_id, text, tab)
-        parts = split_shell_commands(text, info.shell_family)
-        spans = self._command_spans(text, info.shell_family)
+        if (
+            len(parsed) == 1
+            and allow is not None
+            and allow.allows(session_id, parsed[0].command)
+        ):
+            return self._execute_steps(session_id, parsed, tab, alive)
+        if len(parsed) == 1:
+            parts = split_shell_commands(parsed[0].command, info.shell_family)
+            spans = self._command_spans(parsed[0].command, info.shell_family)
+        else:
+            parts = tuple(step.command for step in parsed)
+            spans = ()
         approver = self._approver
         if approver is None:
             return refusal_reason("подтверждение команды недоступно")
@@ -2187,10 +2219,12 @@ class ApplicationService:
                 request_id=f"mcp-{uuid4().hex}",
                 session_id=session_id,
                 intent=why,
-                command=text,
+                command=parsed[0].command if len(parsed) == 1 else text,
                 origin_id=origin,
                 parts=parts,
                 spans=spans,
+                steps=parsed,
+                alive=alive,
             )
         )
         action = answer.action
@@ -2199,16 +2233,28 @@ class ApplicationService:
         if action == "reject_reason":
             reason = answer.reason.strip() or "причина не указана"
             return refusal_reason(reason)
-        if action in ("always", "run"):
+        if answer.commands:
+            parsed = tuple(
+                CommandStep(
+                    normalize_command(item),
+                    parsed[index].description if index < len(parsed) else "",
+                )
+                for index, item in enumerate(answer.commands)
+                if normalize_command(item)
+            )
+            if not parsed:
+                return refusal_reason("пустая команда")
+        elif action in ("always", "run"):
             replacement = normalize_command(answer.command)
             if replacement:
-                text = replacement
+                description = parsed[0].description if parsed else why
+                parsed = (CommandStep(replacement, description),)
         if action == "always":
-            if allow is not None:
-                allow.remember(session_id, text)
-            return self._execute_mcp_command(session_id, text, tab)
+            if allow is not None and len(parsed) == 1:
+                allow.remember(session_id, parsed[0].command)
+            return self._execute_steps(session_id, parsed, tab, alive)
         if action == "run":
-            return self._execute_mcp_command(session_id, text, tab)
+            return self._execute_steps(session_id, parsed, tab, alive)
         if action == "deliver":
             return answer.body.strip() or refusal_reason("пустой вывод")
         return refusal()
@@ -2226,16 +2272,20 @@ class ApplicationService:
         session_id: domain.SessionId,
         command: str,
         interactive_ok: bool = False,
+        alive: Optional[Callable[[], bool]] = None,
     ) -> tuple:
         """Выполнить команду. Вернуть текст для модели, сырой вывод и код."""
         with self._mcp_session_lock(session_id):
-            return self._capture_mcp_output(session_id, command, interactive_ok)
+            return self._capture_mcp_output(
+                session_id, command, interactive_ok, alive
+            )
 
     def _capture_mcp_output(
         self,
         session_id: domain.SessionId,
         command: str,
         interactive_ok: bool = False,
+        alive: Optional[Callable[[], bool]] = None,
     ) -> tuple:
         watch = _McpWatch()
         watch.allow_input = interactive_ok
@@ -2247,12 +2297,16 @@ class ApplicationService:
             except Exception as exc:
                 reason = refusal_reason(str(exc) or "не удалось запустить команду")
                 return reason, "", None
-            if not self._wait_mcp(watch, 600):
+            if not self._wait_mcp(watch, 600, alive):
                 self.cancel_command(session_id)
                 watch.done.wait(5)
+                if watch.peer:
+                    return REQUEST_TIMEOUT, "", None
             self._raise_if_chat_stopped()
             raw_output = watch.output if watch.output.strip() else watch.live
             output = plain_terminal_text(raw_output)
+            if watch.peer:
+                return REQUEST_TIMEOUT, output, watch.code
             if watch.refusal:
                 return refusal_reason(watch.refusal), output, watch.code
             if watch.interactive or watch.shell:
@@ -2279,23 +2333,62 @@ class ApplicationService:
         command: str,
         lounge_tab: str = "",
     ) -> str:
-        model_text, output, _code = self.capture_mcp_output(session_id, command)
-        status = "отказ" if model_text.strip().startswith("отказ") else "выполнено"
-        body = model_text if status == "отказ" or not output.strip() else output
-        mcp = ""
-        if lounge_tab:
-            info = self.get_session(session_id)
-            if info is not None:
-                mcp = self.mcp_label(info)
-        try:
-            self.record_tool_outcome(
-                session_id,
-                call_record(status, command, body, mcp),
-                lounge_tab,
+        return self._execute_steps(
+            session_id,
+            (CommandStep(normalize_command(command), ""),),
+            lounge_tab,
+        )
+
+    def _execute_steps(
+        self,
+        session_id: domain.SessionId,
+        steps: tuple,
+        lounge_tab: str = "",
+        alive: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """Команды по очереди. Ответ — массив той же длины."""
+        rows = []
+        stopped = False
+        reason = ""
+        for index, step in enumerate(steps):
+            if stopped:
+                rows.append((step.command, reason))
+                continue
+            if alive is not None and not alive():
+                stopped = True
+                reason = REQUEST_TIMEOUT
+                rows.append((step.command, reason))
+                continue
+            if self.session_state(session_id) != "ready":
+                stopped = True
+                reason = refusal_reason("сессия не готова принять команду")
+                rows.append((step.command, reason))
+                continue
+            model_text, output, _code = self.capture_mcp_output(
+                session_id, step.command, alive=alive
             )
-        except Exception:
-            pass
-        return model_text
+            if model_text == REQUEST_TIMEOUT:
+                stopped = True
+                reason = REQUEST_TIMEOUT
+                rows.append((step.command, REQUEST_TIMEOUT))
+                continue
+            status = "отказ" if model_text.strip().startswith("отказ") else "выполнено"
+            body = model_text if status == "отказ" or not output.strip() else output
+            mcp = ""
+            if lounge_tab:
+                info = self.get_session(session_id)
+                if info is not None:
+                    mcp = self.mcp_label(info)
+            try:
+                self.record_tool_outcome(
+                    session_id,
+                    call_record(status, step.command, body, mcp),
+                    lounge_tab,
+                )
+            except Exception:
+                pass
+            rows.append((step.command, model_text))
+        return format_command_results(rows)
 
     def mcp_blocks_terminal(self, session_id: domain.SessionId) -> bool:
         """Пока команда идёт из чата модели, лента терминала её не показывает."""
@@ -2335,10 +2428,18 @@ class ApplicationService:
         if stop is not None and stop.cancelled():
             raise domain.ChatStopped()
 
-    def _wait_mcp(self, watch: "_McpWatch", seconds: float) -> bool:
+    def _wait_mcp(
+        self,
+        watch: "_McpWatch",
+        seconds: float,
+        alive: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         deadline = time.monotonic() + seconds
         while not watch.done.wait(0.2):
             self._raise_if_chat_stopped()
+            if alive is not None and not alive():
+                watch.peer = True
+                return False
             if time.monotonic() >= deadline:
                 return False
         return True
@@ -2737,7 +2838,7 @@ class ApplicationService:
             return ""
 
     def session_shell_fact(self, session_id: domain.SessionId) -> str:
-        """Фраза для модели: куда реально уйдёт run_command."""
+        """Фраза для модели: куда реально уйдёт run_commands."""
         nested = self.shell_label(session_id).strip()
         if nested:
             return nested_shell_note(nested)
@@ -2796,7 +2897,7 @@ class ApplicationService:
         if os_name:
             note = (
                 f"\nОС этой сессии: {os_name}\n"
-                "Команды и run_command пиши только для этой ОС. "
+                "Команды и run_commands пиши только для этой ОС. "
                 "Не подменяй её Windows, Linux или другой системой. "
                 "Блок для показа человеку по-прежнему один ```bash.\n"
                 + tail
@@ -2805,7 +2906,7 @@ class ApplicationService:
             note = (
                 "\nОС этой сессии не определена. "
                 "Не угадывай Windows, Linux или другую систему и не выбирай команды наугад. "
-                "Если команда зависит от ОС, сначала узнай её короткой командой через run_command "
+                "Если команда зависит от ОС, сначала узнай её короткой командой через run_commands "
                 "или спроси пользователя.\n"
                 + tail
             )
@@ -3119,16 +3220,16 @@ class ApplicationService:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 return refusal_reason("не удалось прочитать аргументы")
-        if name != TOOL_NAME or not isinstance(arguments, dict):
+        if not is_command_tool(name) or not isinstance(arguments, dict):
             raise ConnectionError(
                 "Модель вызвала инструмент "
                 f"«{name or 'без имени'}», а не {TOOL_NAME}. "
                 "Окно подтверждения команды не открывалось."
             )
-        command = command_text(arguments)
-        if not command:
+        steps = parse_command_steps(arguments)
+        if not steps:
             raise ConnectionError(
-                "Модель вызвала run_command без текста команды. "
+                "Модель вызвала run_commands без текста команды. "
                 "Окно подтверждения не открывалось."
             )
         target = str(arguments.get("target") or "").strip()
@@ -3155,9 +3256,10 @@ class ApplicationService:
             self._lounge_command[origin] = session_id
         return self.run_mcp_command(
             session_id,
-            str(arguments.get("intent") or ""),
-            command,
+            steps[0].description or str(arguments.get("intent") or ""),
+            steps[0].command,
             origin_id=origin,
+            steps=steps,
         )
 
     def hide_command(self, session_id: domain.SessionId, command_id: str) -> None:
@@ -3391,6 +3493,7 @@ class _McpWatch:
         self.ignore_shell = False
         self.refusal = ""
         self.allow_input = False
+        self.peer = False
 
 
 # Сколько команд модель может выполнить за один ответ пользователю.
@@ -3416,9 +3519,15 @@ def _last_assistant_text(messages: list) -> str:
     return ""
 
 
+def _call_commands(arguments: object) -> str:
+    if not isinstance(arguments, dict):
+        return ""
+    return "\n".join(step.command for step in parse_command_steps(arguments))
+
+
 def _calls_without_command(calls: list) -> bool:
     return any(
-        not command_text(getattr(call, "arguments", {}) or {})
+        not _call_commands(getattr(call, "arguments", {}) or {})
         for call in calls
     )
 
@@ -3429,7 +3538,7 @@ def _fresh_calls(calls: list, executed: set) -> list:
         arguments = getattr(call, "arguments", {}) or {}
         if not isinstance(arguments, dict):
             arguments = {}
-        command = command_text(arguments)
+        command = _call_commands(arguments)
         target = str(arguments.get("target") or "").strip()
         key = f"{target}\0{command}"
         if not command or key in executed:

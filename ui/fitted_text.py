@@ -9,7 +9,15 @@ import time
 
 from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QFont, QTextOption
-from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QSizePolicy, QTextEdit, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QPlainTextEdit,
+    QScrollArea,
+    QSizePolicy,
+    QTextEdit,
+    QWidget,
+)
 
 
 class FittedText(QTextEdit):
@@ -37,8 +45,10 @@ class FittedText(QTextEdit):
         self.setPlainText(text)
         self._fitting = False
         self._scroll_limit = 0
+        self._scroll_lines = 0
         self._chain_at_edge = False
         self.viewport().installEventFilter(self)
+        self.viewport().setAutoFillBackground(False)
         self.setFixedHeight(self.fontMetrics().lineSpacing() + 4)
 
     def text(self) -> str:
@@ -66,6 +76,9 @@ class FittedText(QTextEdit):
 
     def fit_to_width(self) -> None:
         if self._fitting:
+            return
+        if self._scroll_lines:
+            fit_limited_height(self, self._scroll_lines)
             return
         width = self.viewport().width()
         if width < 20:
@@ -99,6 +112,11 @@ class FittedText(QTextEdit):
         self._scroll_limit = max(0, int(limit))
         self.fit_to_width()
 
+    def set_scroll_lines(self, lines: int) -> None:
+        """Выше этого числа строк появляется прокрутка."""
+        self._scroll_lines = max(0, int(lines))
+        self.fit_to_width()
+
 
 def clamp_scroll_host(scroll: QScrollArea) -> None:
     """Колонка чата не шире видимой области, даже если внутри длинная строка."""
@@ -127,6 +145,68 @@ def sync_scroll_extent(scroll: QScrollArea) -> None:
         host.updateGeometry()
 
 
+def _block_content_height(widget: QWidget) -> int:
+    """Высота текста по блокам. document.size() у QPlainTextEdit врёт и даёт пустой скролл."""
+    document = widget.document()
+    margin = int(document.documentMargin()) if hasattr(document, "documentMargin") else 0
+    metrics = widget.fontMetrics()
+    line = max(1, metrics.lineSpacing())
+    if isinstance(widget, QPlainTextEdit):
+        height = 0.0
+        block = document.firstBlock()
+        while block.isValid():
+            rect = widget.blockBoundingRect(block)
+            height += rect.height() if rect.height() > 0 else line
+            block = block.next()
+        if height <= 0:
+            height = line
+        return int(math.ceil(height)) + margin * 2
+    width = widget.viewport().width()
+    if width > 20:
+        document.setTextWidth(width)
+    raw = int(math.ceil(float(document.size().height())))
+    return max(line + margin * 2, raw)
+
+
+def fit_limited_height(widget: QWidget, max_lines: int) -> int:
+    """Высота по тексту до max_lines строк. Дальше появляется прокрутка."""
+    if getattr(widget, "_fitting", False):
+        return widget.height()
+    widget._fitting = True
+    try:
+        metrics = widget.fontMetrics()
+        line = max(1, metrics.lineSpacing())
+        document = widget.document()
+        margin = int(document.documentMargin()) if hasattr(document, "documentMargin") else 0
+        chrome = widget.contentsMargins().top() + widget.contentsMargins().bottom()
+        chrome += widget.frameWidth() * 2
+        needed = _block_content_height(widget) + chrome
+        limit = line * max(1, int(max_lines)) + margin * 2 + chrome
+        needed = max(line + margin * 2 + chrome, needed)
+        overflow = needed > limit + 1
+        height = limit if overflow else needed
+        widget._fits_without_scroll = not overflow
+        widget.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if overflow
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        if widget.height() != height:
+            widget.setFixedHeight(int(height))
+        if not overflow and widget.verticalScrollBar().maximum() > 0:
+            # Пара пикселей округления, без раздувания блока под пустое место.
+            extra = min(int(widget.verticalScrollBar().maximum()), line)
+            grown = min(int(height + extra), int(limit))
+            if grown != height:
+                widget.setFixedHeight(grown)
+                height = grown
+            if widget.verticalScrollBar().maximum() > 0:
+                widget.verticalScrollBar().setValue(0)
+        return int(height)
+    finally:
+        widget._fitting = False
+
+
 _WHEEL_GESTURE_GAP = 0.35
 
 
@@ -136,6 +216,9 @@ def scroll_or_chain(widget: QWidget, event) -> None:
     Жест, который только доехал до края, родителя не двигает.
     """
     bar = widget.verticalScrollBar()
+    if getattr(widget, "_fits_without_scroll", False):
+        _forward_wheel(widget, event)
+        return
     delta = event.angleDelta().y()
     pixels = event.pixelDelta().y()
     upward = delta > 0 or (delta == 0 and pixels > 0)

@@ -275,7 +275,7 @@ class PromptTests(unittest.TestCase):
     def test_prompt_offers_shown_code_or_mcp_until_done(self) -> None:
         self.assertIn("обычный текст", _CHAT_SYSTEM_PROMPT)
         self.assertIn("```bash", _CHAT_SYSTEM_PROMPT)
-        self.assertIn("run_command", _CHAT_SYSTEM_PROMPT)
+        self.assertIn("run_commands", _CHAT_SYSTEM_PROMPT)
         self.assertIn("пока не достигнешь результата", _CHAT_SYSTEM_PROMPT)
         self.assertIn("одна команда", _CHAT_SYSTEM_PROMPT)
         self.assertIn("OLD:", _CHAT_SYSTEM_PROMPT)
@@ -626,7 +626,9 @@ class McpCommandTests(unittest.TestCase):
         result = service.run_mcp_command(
             info.session_id, "домашняя папка", "dir %USERPROFILE%"
         )
-        self.assertTrue(result.startswith("выполнено"))
+        rows = json.loads(result)
+        self.assertTrue(rows[0]["result"].startswith("выполнено"))
+        self.assertEqual(rows[0]["command"], "dir %USERPROFILE%")
         self.assertIn("dir %USERPROFILE%", driver.sent)
         sent = [
             event.payload.strip()
@@ -651,7 +653,8 @@ class McpCommandTests(unittest.TestCase):
         info = _session(service, profiles)
         service.set_command_approver(lambda _prompt: CommandAnswer("run"))
         result = service.run_mcp_command(info.session_id, "открыть редактор", "nano")
-        self.assertEqual(result, refusal_reason(INTERACTIVE_REASON))
+        rows = json.loads(result)
+        self.assertEqual(rows[0]["result"], refusal_reason(INTERACTIVE_REASON))
         self.assertIn("nano", driver.sent)
         self.assertTrue(driver.cancelled.is_set())
 
@@ -674,7 +677,8 @@ class McpCommandTests(unittest.TestCase):
         info = _session(service, profiles)
         service.set_command_approver(lambda _prompt: CommandAnswer("run"))
         result = service.run_mcp_command(info.session_id, "открыть оболочку", "bash")
-        self.assertEqual(result, refusal_reason(INTERACTIVE_REASON))
+        rows = json.loads(result)
+        self.assertEqual(rows[0]["result"], refusal_reason(INTERACTIVE_REASON))
         self.assertEqual(driver.sent[-2:], ["bash", "exit"])
 
 
@@ -721,7 +725,7 @@ class ToolLoopTests(unittest.TestCase):
             item for item in client.seen[1][0] if item.get("role") == "tool"
         ][0]
         self.assertIn("a.txt", tool_message["content"])
-        self.assertEqual(client.seen[0][1][0]["function"]["name"], "run_command")
+        self.assertEqual(client.seen[0][1][0]["function"]["name"], "run_commands")
         self.assertIn("nano", client.seen[0][1][0]["function"]["description"])
         self.assertIn("ls", driver.sent)
         texts = [
@@ -995,7 +999,7 @@ class ToolLoopTests(unittest.TestCase):
             listed = _post(endpoint, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
             description = listed["result"]["tools"][0]["description"]
             self.assertIn("nano", description)
-            self.assertEqual(listed["result"]["tools"][0]["name"], "run_command")
+            self.assertEqual(listed["result"]["tools"][0]["name"], "run_commands")
             called = _post(endpoint, {
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -1230,7 +1234,7 @@ class ChatCardTests(unittest.TestCase):
 
     def test_four_buttons_and_reason_field(self) -> None:
         from PySide6.QtGui import QFont
-        from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
+        from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPlainTextEdit, QPushButton
 
         from ui.chat_pane import ChatPane
 
@@ -1271,8 +1275,15 @@ class ChatCardTests(unittest.TestCase):
             ("apt install", "apt update"),
         )
         QApplication.processEvents()
-        labels = pane.findChildren(QLabel, "shellCode")
-        self.assertEqual(labels[-1].text(), "Команда:\napt install\napt update")
+        codes = [
+            item.toPlainText()
+            for item in pane.findChildren(QPlainTextEdit, "commandEdit")
+        ]
+        self.assertEqual(codes, ["apt install", "apt update"])
+        self.assertEqual(
+            [label.text() for label in pane.findChildren(QLabel, "commandIntent")],
+            ["обновить", "обновить"],
+        )
         pane.close()
 
     def test_later_output_keeps_the_approval_in_view(self) -> None:
@@ -1380,15 +1391,19 @@ class ChatCardTests(unittest.TestCase):
         send = card_buttons["Отправить"]
         self.assertTrue(send.isEnabled())
         edit.setPlainText("token=\n")
-        self.assertEqual(send.text(), "Отправить изменённый ответ")
+        self.assertEqual(send.text(), "Отправить (изменённое)")
         edit.setPlainText("token=secret\n")
         self.assertEqual(send.text(), "Отправить")
         edit.setPlainText("token=\n")
         send.click()
         self.assertEqual(delivered[0][0], "id-1")
-        self.assertEqual(delivered[0][1], "token=\n")
+        payload = json.loads(delivered[0][1])
+        self.assertEqual(payload[0]["command"], "ls")
+        self.assertEqual(payload[0]["result"], "token=\n")
         self.assertTrue(delivered[0][2])
-        self.assertEqual(delivered[0][3], "выполнено, код 0\ntoken=secret\n")
+        original = json.loads(delivered[0][3])
+        self.assertEqual(original[0]["command"], "ls")
+        self.assertIn("token=secret", original[0]["result"])
         self.assertEqual(delivered[0][4], 0)
         pane.close()
 
@@ -1529,7 +1544,7 @@ class ChatCardTests(unittest.TestCase):
         window.close()
 
     def test_add_rule_keeps_the_request_and_refreshes_highlight(self) -> None:
-        from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTextEdit
+        from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit, QPushButton
 
         from application.command_rules import command_spans
         from application.terminal_mcp import CommandAsk
@@ -1592,14 +1607,10 @@ class ChatCardTests(unittest.TestCase):
             if button.text() == "Выполнить"
         )
         self.assertTrue(run.isEnabled())
-        edit = window.chat_pane.findChild(QTextEdit, "shellCodeRich")
+        edit = window.chat_pane.findChild(QPlainTextEdit, "commandEdit")
         self.assertIsNotNone(edit)
         assert edit is not None
-        cursor = edit.textCursor()
-        cursor.setPosition(len("Команда: ") + 1)
-        self.assertEqual(cursor.charFormat().foreground().color().name(), "#86efac")
-        cursor.setPosition(len(edit.toPlainText()) - 1)
-        self.assertEqual(cursor.charFormat().foreground().color().name(), "#e4e4e7")
+        self.assertEqual(edit.toPlainText(), command)
         spans = command_spans(
             command,
             domain.SHELL_WINDOWS,
@@ -2311,28 +2322,22 @@ class ChatCardTests(unittest.TestCase):
         thread = threading.Thread(target=work)
         thread.start()
         deadline = time.time() + 3
-        edit = None
+        field = None
         while time.time() < deadline and thread.is_alive():
             QApplication.processEvents()
-            for button in window.chat_pane.findChildren(QPushButton):
-                if button.text() == "Отредактировать перед выполнением" and button.isEnabled():
-                    edit = button
-                    break
-            if edit is not None:
+            field = window.chat_pane.findChild(QPlainTextEdit, "commandEdit")
+            if field is not None:
                 break
             time.sleep(0.02)
-        assert edit is not None
-        edit.click()
-        QApplication.processEvents()
-        field = window.chat_pane.findChild(QPlainTextEdit, "commandEdit")
         assert field is not None
         self.assertFalse(field.isReadOnly())
         self.assertEqual(field.toPlainText(), "ls")
         field.setPlainText("echo quietly")
+        QApplication.processEvents()
         run = next(
             button
             for button in window.chat_pane.findChildren(QPushButton)
-            if button.text() == "Выполнить" and button.isEnabled()
+            if button.text().startswith("Выполнить") and button.isEnabled()
         )
         run.click()
         thread.join(timeout=3)
@@ -2708,7 +2713,7 @@ class LoungeChatTests(unittest.TestCase):
         service.choose_lounge_model(tab.tab_id, "m-1")
         service.send_lounge_chat(tab.tab_id, "что в каталоге")
         self.assertGreaterEqual(calls["n"], 2)
-        self.assertIn("run_command не вызван", seen[1][-1]["content"])
+        self.assertIn("run_commands не вызван", seen[1][-1]["content"])
         self.assertEqual(gate.asks[0].session_id, info.session_id)
         self.assertIn("ls", driver.sent)
         self.assertEqual(service.lounge_problem(tab.tab_id), "")

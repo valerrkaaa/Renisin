@@ -29,10 +29,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from application.terminal_mcp import parse_call
+from application.terminal_mcp import format_command_results, parse_call
 from screen_log import plain_terminal_text
 from ui.command_input import five_line_height, one_line_height
-from ui.fitted_text import FittedText, clamp_scroll_host, scroll_or_chain
+from ui.fitted_text import FittedText, clamp_scroll_host, fit_limited_height, scroll_or_chain
 from ui.terminal_view import TerminalView
 
 _FENCE = re.compile(r"```([^\n`]*)\r?\n(.*?)```", re.DOTALL)
@@ -45,7 +45,10 @@ _OLD_LINE = re.compile(r"^(?:old|было|старое)\s*[:=]\s*\|?\s*(.*)$", r
 _NEW_LINE = re.compile(r"^(?:new|стало|новое)\s*[:=]\s*\|?\s*(.*)$", re.IGNORECASE)
 _THINKING_FRAMES = ("Думает", "Думает.", "Думает..", "Думает...")
 _SELECTABLE = ("chatUser", "chatAssistant", "chatPlain", "shellCode")
-_PREVIEW_LIMIT = 240
+_COMMAND_MAX_LINES = 20
+_OUTPUT_MAX_LINES = 20
+_CODE_MARGIN = 6
+_CHANGED_MARK = " (изменённое)"
 
 
 class _SelectableText(QTextEdit):
@@ -382,7 +385,29 @@ class _CaptureEdit(QPlainTextEdit):
         super().__init__()
         self._wheel_at = 0.0
         self._gesture_chains = False
+        self._fitting = False
+        self._max_lines = 0
         self.viewport().installEventFilter(self)
+        self.viewport().setAutoFillBackground(False)
+
+    def enable_line_fit(self, max_lines: int = _COMMAND_MAX_LINES) -> None:
+        """Расти по тексту до max_lines, дальше прокрутка внутри блока."""
+        self._max_lines = max(1, int(max_lines))
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.document().setDocumentMargin(_CODE_MARGIN)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.textChanged.connect(self._fit)
+        self._fit()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._max_lines:
+            self._fit()
+
+    def _fit(self) -> None:
+        if self._max_lines:
+            fit_limited_height(self, self._max_lines)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         self._scroll_wheel(event)
@@ -405,6 +430,7 @@ class _CommandText(QTextEdit):
         mono: QFont,
         parts: Tuple[str, ...],
         spans: Sequence[Sequence[object]],
+        banner: bool = True,
     ) -> None:
         super().__init__()
         self.setObjectName("shellCodeRich")
@@ -423,7 +449,7 @@ class _CommandText(QTextEdit):
         option = self.document().defaultTextOption()
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.document().setDefaultTextOption(option)
-        self.document().setDocumentMargin(0)
+        self.document().setDocumentMargin(_CODE_MARGIN)
         self.viewport().setAutoFillBackground(False)
         self._fitting = False
         self.viewport().installEventFilter(self)
@@ -434,9 +460,10 @@ class _CommandText(QTextEdit):
         hit.setForeground(QColor("#86efac"))
         cursor = self.textCursor()
         cursor.beginEditBlock()
-        shown = [part.strip() for part in parts if part and part.strip()]
-        prefix = "Команда: " if len(shown) <= 1 and len(spans) <= 1 else "Команда:\n"
-        cursor.insertText(prefix, plain)
+        if banner:
+            shown = [part.strip() for part in parts if part and part.strip()]
+            prefix = "Команда: " if len(shown) <= 1 and len(spans) <= 1 else "Команда:\n"
+            cursor.insertText(prefix, plain)
         for index, line in enumerate(spans):
             if index:
                 cursor.insertText("\n", plain)
@@ -467,24 +494,43 @@ class _CommandText(QTextEdit):
         self._fit()
 
     def _fit(self) -> None:
-        if self._fitting:
-            return
-        self._fitting = True
-        try:
-            width = self.viewport().width()
-            if width > 20:
-                self.document().setTextWidth(width)
-            height = int(self.document().size().height()) + 4
-            capped = min(height, _PREVIEW_LIMIT)
-            self.setVerticalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAsNeeded
-                if height > _PREVIEW_LIMIT
-                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            )
-            if self.height() != capped:
-                self.setFixedHeight(max(22, capped))
-        finally:
-            self._fitting = False
+        fit_limited_height(self, _COMMAND_MAX_LINES)
+
+
+def _count_phrase(n: int) -> str:
+    last = n % 10
+    last2 = n % 100
+    if last == 1 and last2 != 11:
+        word = "команда"
+    elif last in {2, 3, 4} and last2 not in {12, 13, 14}:
+        word = "команды"
+    else:
+        word = "команд"
+    return f"{n} {word}"
+
+
+def _step_specs(
+    intent: str,
+    command: str,
+    parts: Tuple[str, ...],
+    steps: Sequence[object],
+) -> Tuple[list, bool]:
+    """Пары описание/команда и признак: выполнять по отдельности."""
+    real = tuple(steps)
+    if real:
+        items = []
+        for step in real:
+            text = str(getattr(step, "command", "") or "")
+            description = str(getattr(step, "description", "") or "")
+            if isinstance(step, tuple):
+                description = str(step[0] if len(step) > 1 else "")
+                text = str(step[-1])
+            items.append((description, text))
+        return items, True
+    shown = [part.strip() for part in parts if part and str(part).strip()]
+    if len(shown) > 1:
+        return [(intent, part) for part in shown], False
+    return [(intent, command)], False
 
 
 class _CommandRequest(QFrame):
@@ -507,6 +553,7 @@ class _CommandRequest(QFrame):
         target: str = "",
         parts: Tuple[str, ...] = (),
         spans: Sequence[Sequence[object]] = (),
+        steps: Sequence[object] = (),
     ) -> None:
         super().__init__()
         self._request_id = request_id
@@ -514,12 +561,21 @@ class _CommandRequest(QFrame):
         self._parts = parts
         self.setObjectName("commandRequest")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
-        title = QLabel("Запрос на выполнение команды")
+        self._mono = mono
+
+        title = QLabel("Запрос на выполнение команд")
         title.setObjectName("requestTitle")
         title.setWordWrap(True)
         self._title = title
+        specs, separate = _step_specs(intent, command, parts, steps)
+        self._joined = not separate
+        self._multi = separate and len(specs) > 1
+        meta = QLabel(f"{_count_phrase(len(specs))} · ожидает подтверждения")
+        meta.setObjectName("commandMeta")
+        meta.setWordWrap(True)
+        self._meta = meta
         add_rule = QPushButton("Добавить правило")
         add_rule.setObjectName("auxButton")
         add_rule.setToolTip(
@@ -527,65 +583,38 @@ class _CommandRequest(QFrame):
             "Команда при этом не выполняется."
         )
         add_rule.clicked.connect(lambda: self.rule_requested.emit(self._request_id))
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        head.addWidget(title, 1)
-        head.addWidget(add_rule, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(head)
+        head_main = QVBoxLayout()
+        head_main.setContentsMargins(0, 0, 0, 0)
+        head_main.setSpacing(3)
+        head_main.addWidget(title)
         if target:
             where = QLabel(f"MCP: {target}")
             where.setObjectName("commandTarget")
             where.setWordWrap(True)
-            layout.addWidget(where)
-        why = QLabel(f"{intent}")
-        why.setObjectName("commandIntent")
-        why.setWordWrap(True)
-        why.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
-        )
-        layout.addWidget(why)
-        self._mono = mono
-        self._code = self._make_preview(parts, spans)
-        layout.addWidget(self._code)
+            head_main.addWidget(where)
+        head_main.addWidget(meta)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addLayout(head_main, 1)
+        head.addWidget(add_rule, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(head)
 
-        run = QPushButton("Выполнить")
-        run.setObjectName("auxButton")
-        run.setToolTip("Выполнить команду один раз")
-        run.clicked.connect(lambda: self._choose("run", ""))
-        edit = QPushButton("Отредактировать перед выполнением")
-        edit.setObjectName("auxButton")
-        edit.setToolTip("Изменить текст команды. Модель об этом не узнает.")
-        edit.clicked.connect(self._edit_command)
-        self._edit_button = edit
-        explain = QPushButton("Отклонить по причине")
-        explain.setObjectName("auxButton")
-        explain.setToolTip("Отказать и передать модели причину")
-        explain.clicked.connect(self._show_reason)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(run)
-        row.addWidget(edit)
-        row.addStretch(1)
-        layout.addLayout(row)
-        second = QHBoxLayout()
-        second.setSpacing(8)
-        second.addWidget(explain)
-        second.addStretch(1)
-        layout.addLayout(second)
-
+        self._step_rows: list = []
+        self._active_output = 0
         self._command_edit: QPlainTextEdit | None = None
-        self._output = _CaptureEdit()
-        self._output.setObjectName("commandCapture")
-        self._output.setFont(mono)
-        self._output.setReadOnly(True)
-        self._output.setPlaceholderText("Вывод команды")
-        self._output.setMinimumHeight(96)
-        self._output.setMaximumHeight(280)
-        self._output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._output.setVisible(False)
-        layout.addWidget(self._output)
+        steps_host = QWidget()
+        steps_host.setObjectName("commandSteps")
+        steps_layout = QVBoxLayout(steps_host)
+        steps_layout.setContentsMargins(0, 0, 0, 0)
+        steps_layout.setSpacing(8)
+        for index, (description, text) in enumerate(specs):
+            self._add_step(steps_layout, index, description, text)
+        layout.addWidget(steps_host)
+        self._code = self._step_rows[0]["editor"]
+        self._command_edit = self._code
+        self._output = self._step_rows[0]["output"]
+        self._outputs = [row["output"] for row in self._step_rows]
+
         self._stdin = QLineEdit()
         self._stdin.setObjectName("commandStdin")
         self._stdin.setFont(mono)
@@ -594,24 +623,49 @@ class _CommandRequest(QFrame):
             "Сюда попадает то, что ждёт программа.\n"
             "q и Enter закрывают more. Кнопка «Прервать» останавливает её."
         )
-        self._stdin.setVisible(False)
         self._stdin.returnPressed.connect(self._submit_stdin)
         self._stop = QPushButton("Прервать")
         self._stop.setObjectName("auxButton")
         self._stop.setToolTip("Остановить программу, которая ждёт ввод")
-        self._stop.setVisible(False)
         self._stop.clicked.connect(self._interrupt)
         typing = QHBoxLayout()
+        typing.setContentsMargins(0, 0, 0, 0)
         typing.setSpacing(8)
         typing.addWidget(self._stdin, 1)
         typing.addWidget(self._stop)
-        layout.addLayout(typing)
         self._screen = TerminalView(mono)
         self._screen.setObjectName("commandScreen")
         self._screen.setVisible(False)
         self._screen.input_generated.connect(self.input_generated.emit)
         self._screen.resized.connect(self.resized.emit)
-        layout.addWidget(self._screen)
+        self._live_host = QWidget()
+        self._live_host.setObjectName("commandLive")
+        live_layout = QVBoxLayout(self._live_host)
+        live_layout.setContentsMargins(0, 0, 0, 0)
+        live_layout.setSpacing(6)
+        live_layout.addLayout(typing)
+        live_layout.addWidget(self._screen)
+        self._live_host.setParent(self)
+        self._live_host.setVisible(False)
+
+        run = QPushButton("Выполнить")
+        run.setObjectName("primaryButton")
+        run.setToolTip("Выполнить команду один раз")
+        run.clicked.connect(lambda: self._choose("run", ""))
+        self._run = run
+        explain = QPushButton("Отклонить по причине")
+        explain.setObjectName("auxButton")
+        explain.setToolTip("Отказать и передать модели причину")
+        explain.clicked.connect(self._show_reason)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addWidget(run)
+        actions.addWidget(explain)
+        actions.addStretch(1)
+        self._approval_row = QWidget()
+        self._approval_row.setLayout(actions)
+        layout.addWidget(self._approval_row)
+
         self._secret = False
         self._captured = ""
         self._model_text = ""
@@ -622,17 +676,20 @@ class _CommandRequest(QFrame):
         self._raw = ""
         self._live = ""
 
-        review = QHBoxLayout()
-        review.setSpacing(8)
         send = QPushButton("Отправить")
-        send.setObjectName("auxButton")
+        send.setObjectName("primaryButton")
         send.setToolTip("Передать модели вывод команды")
         send.clicked.connect(self._send_output)
         self._send_review = send
+        for editor in self._outputs:
+            editor.textChanged.connect(self._sync_send_label)
         review_reject = QPushButton("Отклонить по причине")
         review_reject.setObjectName("auxButton")
         review_reject.setToolTip("Отказать и передать модели причину")
         review_reject.clicked.connect(self._show_reason)
+        review = QHBoxLayout()
+        review.setContentsMargins(0, 0, 0, 0)
+        review.setSpacing(8)
         review.addWidget(send)
         review.addWidget(review_reject)
         review.addStretch(1)
@@ -640,6 +697,14 @@ class _CommandRequest(QFrame):
         self._review_row.setLayout(review)
         self._review_row.setVisible(False)
         layout.addWidget(self._review_row)
+        hint = QLabel(
+            "Вывод можно исправить перед отправкой — модель получит уже правленый текст."
+        )
+        hint.setObjectName("commandHint")
+        hint.setWordWrap(True)
+        hint.setVisible(False)
+        self._hint = hint
+        layout.addWidget(hint)
 
         self._reason_row = QWidget()
         reason_layout = QHBoxLayout(self._reason_row)
@@ -658,66 +723,188 @@ class _CommandRequest(QFrame):
         reason_layout.addWidget(submit)
         self._reason_row.setVisible(False)
         layout.addWidget(self._reason_row)
-        self._approval = (run, edit, add_rule, explain)
+        self._add_rule = add_rule
+        self._approval = (run, explain)
         self._review_buttons = (send, review_reject, submit)
         self._buttons = self._approval + (submit,)
-        self._output.textChanged.connect(self._sync_send_label)
+        self._sync_run_label()
+
+    def _add_step(
+        self,
+        layout: QVBoxLayout,
+        index: int,
+        description: str,
+        command: str,
+    ) -> None:
+        frame = QFrame()
+        frame.setObjectName("commandStep")
+        body = QVBoxLayout(frame)
+        body.setContentsMargins(8, 8, 8, 8)
+        body.setSpacing(6)
+        desc_row = QHBoxLayout()
+        desc_row.setSpacing(6)
+        number = QLabel(str(index + 1))
+        number.setObjectName("commandStepIndex")
+        number.setFont(self._mono)
+        desc_row.addWidget(number, 0, Qt.AlignmentFlag.AlignTop)
+        label = QLabel(description or "Команда")
+        label.setObjectName("commandIntent")
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        desc_row.addWidget(label, 1)
+        body.addLayout(desc_row)
+
+        prompt = QLabel("$")
+        prompt.setObjectName("commandPrompt")
+        prompt.setFont(self._mono)
+        editor = self._make_command_editor(command)
+        cmd_row = QHBoxLayout()
+        cmd_row.setSpacing(6)
+        cmd_row.addWidget(prompt, 0, Qt.AlignmentFlag.AlignTop)
+        cmd_row.addWidget(editor, 1)
+        cmd_wrap = QWidget()
+        cmd_wrap.setObjectName("commandCmd")
+        cmd_inner = QHBoxLayout(cmd_wrap)
+        cmd_inner.setContentsMargins(6, 6, 6, 6)
+        cmd_inner.setSpacing(6)
+        cmd_inner.addLayout(cmd_row)
+        body.addWidget(cmd_wrap)
+
+        output = self._make_output()
+        rail = QFrame()
+        rail.setObjectName("commandOutRail")
+        rail_layout = QVBoxLayout(rail)
+        rail_layout.setContentsMargins(10, 6, 0, 0)
+        rail_layout.setSpacing(6)
+        rail_layout.addWidget(output)
+        rail.setVisible(False)
+        body.addWidget(rail)
+        layout.addWidget(frame)
+        self._step_rows.append(
+            {
+                "original": command,
+                "command": command,
+                "description": description,
+                "editor": editor,
+                "preview": editor,
+                "output": output,
+                "rail": rail,
+                "frame": frame,
+                "captured": "",
+                "model_text": "",
+                "code": None,
+            }
+        )
+
+    def _make_output(self) -> _CaptureEdit:
+        output = _CaptureEdit()
+        output.setObjectName("commandCapture")
+        output.setFont(self._mono)
+        output.setReadOnly(True)
+        output.setPlaceholderText("Вывод команды")
+        output.enable_line_fit(_OUTPUT_MAX_LINES)
+        output.setVisible(False)
+        return output
+
+    def _make_command_editor(self, text: str) -> _CaptureEdit:
+        editor = _CaptureEdit()
+        editor.setObjectName("commandEdit")
+        editor.setFont(self._mono)
+        editor.setPlainText(text)
+        editor.setReadOnly(False)
+        editor.enable_line_fit(_COMMAND_MAX_LINES)
+        editor.textChanged.connect(self._sync_run_label)
+        return editor
+
+    def _place_live(self, index: int) -> None:
+        row = self._step_rows[index]
+        rail = row["rail"]
+        layout = rail.layout()
+        if self._live_host.parent() is not rail:
+            layout.addWidget(self._live_host)
+        rail.setVisible(True)
+        self._live_host.setVisible(True)
+
+    def _reveal_output(self, editor: QWidget) -> None:
+        editor.setVisible(True)
+        for row in self._step_rows:
+            if row["output"] is editor:
+                row["rail"].setVisible(True)
+                break
 
     def request_id(self) -> str:
         return self._request_id
 
     def command_to_run(self) -> str | None:
-        """Текст из поля правки. None, пока команду не открыли на редактирование."""
-        box = self._command_edit
-        if box is None or box.isHidden():
+        edited = self.edited_commands()
+        if edited is None:
             return None
-        return box.toPlainText()
+        return edited[0] if len(edited) == 1 else "\n".join(edited)
 
-    def _edit_command(self) -> None:
-        if self._command_edit is None:
-            box = _CaptureEdit()
-            box.setObjectName("commandEdit")
-            box.setFont(self._mono)
-            box.setPlainText(self._command)
-            box.setMinimumHeight(72)
-            box.setMaximumHeight(280)
-            box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            layout = self.layout()
-            index = layout.indexOf(self._code)
-            if index < 0:
-                layout.addWidget(box)
-            else:
-                layout.insertWidget(index, box)
-            self._command_edit = box
-        self._code.hide()
-        self._command_edit.show()
-        self._command_edit.setReadOnly(False)
-        self._command_edit.setFocus()
-        self._edit_button.hide()
-        self._reveal_in_chat()
+    def edited_commands(self) -> Tuple[str, ...] | None:
+        """Тексты команд, если пользователь что-то менял. Иначе None."""
+        texts = [row["editor"].toPlainText() for row in self._step_rows]
+        originals = [row["original"] for row in self._step_rows]
+        if texts == originals:
+            return None
+        if any(not item.strip() for item in texts):
+            return tuple(texts)
+        if self._joined:
+            return ("\n".join(texts),)
+        return tuple(texts)
 
     def set_preview(self, parts: Tuple[str, ...], spans: Sequence[Sequence[object]]) -> None:
-        """Перерисовать команды после нового шаблона."""
+        """Текст команд после нового шаблона. Уже правленые поля не трогаем."""
+        shown = [part.strip() for part in parts if part and str(part).strip()]
+        if len(shown) != len(self._step_rows):
+            return
         self._parts = parts
-        layout = self.layout()
-        index = layout.indexOf(self._code)
-        layout.removeWidget(self._code)
-        self._code.deleteLater()
-        self._code = self._make_preview(parts, spans)
-        if index < 0:
-            layout.addWidget(self._code)
-        else:
-            layout.insertWidget(index, self._code)
+        for index, row in enumerate(self._step_rows):
+            if row["editor"].toPlainText() == row["original"]:
+                row["editor"].blockSignals(True)
+                row["editor"].setPlainText(shown[index])
+                row["editor"].blockSignals(False)
+                row["original"] = shown[index]
+                row["command"] = shown[index]
+        self._sync_run_label()
 
-    def _make_preview(self, parts: Tuple[str, ...], spans: Sequence[Sequence[object]]) -> QWidget:
-        rich = command_rich_text(self._command, parts, spans)
-        if rich is None:
-            code = FittedText(command_caption(self._command, parts), self._mono)
-            code.setObjectName("shellCode")
-            code.set_scroll_limit(_PREVIEW_LIMIT)
-            code.chain_scroll_at_edge()
-            return code
-        return _CommandText(self._mono, parts, spans)
+    def begin_step(self, index: int) -> None:
+        """Показать вывод той команды, которая сейчас выполняется."""
+        if not self._step_rows:
+            return
+        self._active_output = max(0, min(index, len(self._step_rows) - 1))
+        self._raw = ""
+        self._live = ""
+        self._secret = False
+        self._prompted = False
+        row = self._step_rows[self._active_output]
+        editor = row["output"]
+        editor.setPlainText("")
+        editor.setReadOnly(True)
+        editor.setPlaceholderText("Команда выполняется…")
+        self._reveal_output(editor)
+        self._place_live(self._active_output)
+        self._stdin.setVisible(True)
+        self._stdin.clear()
+        self._stdin.setReadOnly(False)
+        self._stdin.setEchoMode(QLineEdit.EchoMode.Normal)
+        self._stdin.setPlaceholderText("Ввод в программу, затем Enter")
+        self._stop.setVisible(True)
+        self._screen.setVisible(False)
+        self._meta.setText(
+            f"{_count_phrase(len(self._step_rows))} · выполняется "
+            f"{self._active_output + 1}/{len(self._step_rows)}"
+        )
+        QTimer.singleShot(0, self._focus_stdin)
+        self._reveal_in_chat()
+
+    def active_step_widget(self) -> QWidget | None:
+        if not self._step_rows:
+            return None
+        return self._step_rows[self._active_output]["frame"]
 
     def _show_reason(self) -> None:
         self._reason.setReadOnly(False)
@@ -744,27 +931,14 @@ class _CommandRequest(QFrame):
 
     def show_running(self) -> None:
         """Команда пошла в терминал. Вывод копится в этом блоке."""
-        for button in self._approval:
-            button.hide()
-        self._output.setVisible(True)
-        self._output.setReadOnly(True)
-        self._output.setPlaceholderText("Команда выполняется…")
-        self._output.setPlainText("")
+        self._approval_row.hide()
+        for row in self._step_rows:
+            row["editor"].setReadOnly(True)
         self._review_row.setVisible(False)
-        self._stdin.setVisible(True)
-        self._stdin.clear()
-        self._stdin.setReadOnly(False)
-        self._stdin.setEchoMode(QLineEdit.EchoMode.Normal)
-        self._stdin.setPlaceholderText("Ввод в программу, затем Enter")
-        self._stop.setVisible(True)
-        self._secret = False
-        self._prompted = False
-        QTimer.singleShot(0, self._focus_stdin)
-        self._screen.setVisible(False)
-        self._editable = False
+        self._hint.setVisible(False)
         self._settled = False
-        self._raw = ""
-        self._live = ""
+        self._editable = False
+        self.begin_step(0)
 
     def note_output(self, text: str, replace: bool) -> None:
         if self._editable or self._settled:
@@ -774,10 +948,11 @@ class _CommandRequest(QFrame):
         else:
             self._raw += text
         self._live = plain_terminal_text(self._raw)
-        self._output.setPlainText(self._live)
-        cursor = self._output.textCursor()
+        editor = self._step_rows[self._active_output]["output"]
+        editor.setPlainText(self._live)
+        cursor = editor.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
-        self._output.setTextCursor(cursor)
+        editor.setTextCursor(cursor)
         if not self._prompted and _pager_waiting(self._live):
             self._prompted = True
             self._stdin.setPlaceholderText("q и Enter закрывают more")
@@ -788,6 +963,7 @@ class _CommandRequest(QFrame):
         if self._settled or self._secret:
             return
         self._secret = True
+        self._place_live(self._active_output)
         self._stdin.setVisible(True)
         self._stdin.setEchoMode(QLineEdit.EchoMode.Password)
         self._stdin.setPlaceholderText("Пароль")
@@ -804,6 +980,7 @@ class _CommandRequest(QFrame):
         """Полноэкранный ввод: клавиши уходят в ту же сессию."""
         if self._settled:
             return
+        self._place_live(self._active_output)
         if not self._screen.isVisible():
             self._screen.setVisible(True)
             self._screen.set_interactive(True)
@@ -822,7 +999,7 @@ class _CommandRequest(QFrame):
 
     def _focus_stdin(self) -> None:
         try:
-            visible = self._stdin.isVisible()
+            visible = self._stdin.isVisible() and self._live_host.isVisible()
         except RuntimeError:
             return
         if visible and not self._secret:
@@ -836,57 +1013,124 @@ class _CommandRequest(QFrame):
         self._stdin.clear()
         self.stdin_submitted.emit(text + "\n")
 
-    def show_result(self, output: str, model_text: str, code: object) -> None:
+    def _enter_review(self) -> None:
         self._settled = True
-        self._model_text = model_text
-        self._exit_code = code
-        shown = plain_terminal_text(output if output.strip() else model_text)
-        self._captured = shown
-        self._raw = shown
         self._editable = True
-        self._output.setPlainText(shown)
-        self._output.setVisible(True)
-        self._output.setReadOnly(False)
-        self._title.setText("Подтверждение отправки")
+        self._title.setText("Проверка вывода перед отправкой")
+        self._meta.setText(f"{_count_phrase(len(self._step_rows))} · вывод готов")
         self.setProperty("review", "true")
         self.style().unpolish(self)
         self.style().polish(self)
-        self._sync_send_label()
+        self._live_host.setVisible(False)
         self._stdin.setVisible(False)
         self._stop.setVisible(False)
         self._screen.set_interactive(False)
         self._screen.setVisible(False)
+        self._approval_row.hide()
         self._review_row.setVisible(True)
+        self._hint.setVisible(True)
         for button in self._review_buttons:
             button.setEnabled(True)
             button.show()
+        self._sync_send_label()
+
+    def show_result(self, output: str, model_text: str, code: object) -> None:
+        shown = plain_terminal_text(output if output.strip() else model_text)
+        self._captured = shown
+        self._raw = shown
+        self._model_text = model_text
+        self._exit_code = code
+        row = self._step_rows[0]
+        row["captured"] = shown
+        row["model_text"] = model_text
+        row["code"] = code
+        row["output"].setPlainText(shown)
+        row["output"].setReadOnly(False)
+        self._reveal_output(row["output"])
+        self._enter_review()
+
+    def show_step_results(self, rows: Sequence[Sequence[object]]) -> None:
+        """Пары «команда — вывод». Каждый вывод можно править."""
+        for index, row in enumerate(rows):
+            output = str(row[1])
+            model_text = str(row[2])
+            code = row[3] if len(row) > 3 else None
+            stored = self._step_rows[index]
+            shown = plain_terminal_text(output if output.strip() else model_text)
+            stored["captured"] = shown
+            stored["model_text"] = model_text
+            stored["code"] = code
+            editor = stored["output"]
+            editor.setPlainText(shown)
+            editor.setReadOnly(False)
+            self._reveal_output(editor)
+        if self._step_rows:
+            last = self._step_rows[-1]
+            self._captured = last["captured"]
+            self._model_text = last["model_text"]
+            self._exit_code = last["code"]
+        self._enter_review()
+
+    def _commands_changed(self) -> bool:
+        return any(
+            row["editor"].toPlainText() != row["original"] for row in self._step_rows
+        )
+
+    def _outputs_changed(self) -> bool:
+        return any(
+            row["output"].isVisible() and row["output"].toPlainText() != row["captured"]
+            for row in self._step_rows
+        )
+
+    def _sync_run_label(self) -> None:
+        if getattr(self, "_run", None) is None:
+            return
+        self._run.setText("Выполнить" + (_CHANGED_MARK if self._commands_changed() else ""))
 
     def _sync_send_label(self) -> None:
-        changed = self._output.toPlainText() != self._captured
+        if getattr(self, "_send_review", None) is None:
+            return
         self._send_review.setText(
-            "Отправить изменённый ответ" if changed else "Отправить"
+            "Отправить" + (_CHANGED_MARK if self._outputs_changed() else "")
         )
 
     def _send_output(self) -> None:
-        text = self._output.toPlainText()
-        edited = text != self._captured
+        pairs = []
+        original = []
+        edited = False
+        for row in self._step_rows:
+            current = row["output"].toPlainText()
+            source = row["original"]
+            model_text = row["model_text"] or current
+            if current != row["captured"]:
+                edited = True
+                pairs.append((source, current))
+            else:
+                pairs.append((source, model_text))
+            original.append((source, model_text))
+        text = format_command_results(pairs)
+        model_text = format_command_results(original)
+        code = self._step_rows[-1]["code"] if self._step_rows else None
         for button in self._review_buttons:
             button.setEnabled(False)
-        self._output.setReadOnly(True)
+        for row in self._step_rows:
+            row["output"].setReadOnly(True)
+            row["editor"].setReadOnly(True)
         self.output_decided.emit(
-            self._request_id, text, edited, self._model_text, self._exit_code
+            self._request_id, text, edited, model_text, code
         )
 
     def _choose(self, action: str, reason: str) -> None:
         if action == "run":
-            edited = self.command_to_run()
-            if edited is not None and not edited.strip():
-                if self._command_edit is not None:
-                    self._command_edit.setFocus()
-                return
+            for row in self._step_rows:
+                if not row["editor"].toPlainText().strip():
+                    row["editor"].setFocus()
+                    return
         for button in self._buttons + self._review_buttons:
             button.setEnabled(False)
-        self._output.setReadOnly(True)
+        for row in self._step_rows:
+            row["output"].setReadOnly(True)
+            row["editor"].setReadOnly(True)
         self._reason.setReadOnly(True)
         self.decided.emit(self._request_id, action, reason)
 
@@ -1350,10 +1594,17 @@ class ChatPane(QWidget):
         command: str,
         parts: Tuple[str, ...] = (),
         spans: Sequence[Sequence[object]] = (),
+        steps: Sequence[object] = (),
     ) -> None:
         self.clear_command_request()
         card = _CommandRequest(
-            request_id, intent, command, self._mono, parts=parts, spans=spans
+            request_id,
+            intent,
+            command,
+            self._mono,
+            parts=parts,
+            spans=spans,
+            steps=steps,
         )
         card.decided.connect(self.command_decided.emit)
         card.output_decided.connect(self.output_decided.emit)
@@ -1423,6 +1674,28 @@ class ChatPane(QWidget):
         card.show_result(output, model_text, code)
         self.reveal_command_request()
 
+    def begin_command_step(self, request_id: str, index: int) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.begin_step(index)
+        self.reveal_command_request()
+
+    def show_command_steps(
+        self, request_id: str, rows: Sequence[Sequence[object]]
+    ) -> None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return
+        card.show_step_results(rows)
+        self.reveal_command_request()
+
+    def edited_commands(self, request_id: str) -> Tuple[str, ...] | None:
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return None
+        return card.edited_commands()
+
     def edited_command(self, request_id: str) -> str | None:
         card = self._request_card
         if card is None or card.request_id() != request_id:
@@ -1457,14 +1730,17 @@ class ChatPane(QWidget):
         self.reveal_command_request()
 
     def clear_command_request(self) -> None:
-        card = self._request_card
         self._request_card = None
-        if card is None:
-            return
-        self._messages.removeWidget(card)
-        card.hide()
-        card.setParent(None)
-        card.deleteLater()
+        layout = self._messages
+        for index in range(layout.count() - 1, -1, -1):
+            item = layout.itemAt(index)
+            card = item.widget() if item is not None else None
+            if card is None or card.objectName() != "commandRequest":
+                continue
+            layout.removeWidget(card)
+            card.hide()
+            card.setParent(None)
+            card.deleteLater()
 
     def set_problem(self, text: str, title: str = "") -> None:
         self._problem.setText(text)
@@ -1764,6 +2040,15 @@ class ChatPane(QWidget):
             self._messages.activate()
             bar = self._scroll.verticalScrollBar()
             view = max(1, self._scroll.viewport().height())
+            step = card.active_step_widget()
+            if step is not None and card.height() >= view - 8:
+                top = step.mapTo(self._messages_host, QPoint(0, 0)).y()
+                bottom = top + step.height()
+                if bottom > bar.value() + view - 8:
+                    bar.setValue(min(bar.maximum(), max(0, bottom - view + 12)))
+                elif top < bar.value():
+                    bar.setValue(max(0, top - 4))
+                return
             if card.height() >= view - 8:
                 top = max(0, card.y() - 4)
                 bar.setValue(min(bar.maximum(), top))

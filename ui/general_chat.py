@@ -191,11 +191,12 @@ class GeneralChatPage(QWidget):
         target: str,
         parts: Tuple[str, ...] = (),
         spans: tuple = (),
+        steps: tuple = (),
     ) -> None:
         tab = self._find_tab(tab_id)
         if tab is None:
             return
-        tab.request = (request_id, intent, command, target, tuple(parts), spans)
+        tab.request = (request_id, intent, command, target, tuple(parts), spans, tuple(steps))
         if self._tabs[self._current].tab_id == tab_id:
             self._render_messages()
 
@@ -646,8 +647,9 @@ class GeneralChatPage(QWidget):
             request_id, intent, command, target = tab.request[:4]
             parts = tab.request[4] if len(tab.request) > 4 else ()
             spans = tab.request[5] if len(tab.request) > 5 else ()
+            steps = tab.request[6] if len(tab.request) > 6 else ()
             card = _CommandRequest(
-                request_id, intent, command, self._mono, target, parts, spans
+                request_id, intent, command, self._mono, target, parts, spans, steps
             )
             card.decided.connect(self.command_decided.emit)
             card.rule_requested.connect(self.rule_requested.emit)
@@ -656,6 +658,15 @@ class GeneralChatPage(QWidget):
         self._fit_transcript()
         QTimer.singleShot(0, self._fit_transcript)
         self._scroll_bottom()
+
+    def edited_commands(self, request_id: str):
+        card = self._request_card
+        if card is None or card.request_id() != request_id:
+            return None
+        reader = getattr(card, "edited_commands", None)
+        if not callable(reader):
+            return None
+        return reader()
 
     def edited_command(self, request_id: str) -> str | None:
         card = self._request_card
@@ -680,6 +691,7 @@ class GeneralChatPage(QWidget):
                 request[3] if len(request) > 3 else "",
                 tuple(parts),
                 spans,
+                request[6] if len(request) > 6 else (),
             )
         card = self._request_card
         if card is not None and card.request_id() == request_id:
