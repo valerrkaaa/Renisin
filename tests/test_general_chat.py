@@ -95,8 +95,10 @@ class _Service:
         return [profile] if profile is not None else []
 
     def mcp_endpoint(self, session_id=None) -> str:
-        info = self.get_session(session_id) if session_id else None
-        if info is None or not info.llm_profile_id:
+        if session_id is None:
+            return "http://127.0.0.1:9/mcp"
+        info = self.get_session(session_id)
+        if info is None:
             return ""
         return f"http://127.0.0.1:9/mcp/{session_id}"
 

@@ -1290,7 +1290,7 @@ class ChatPane(QWidget):
         scroll.viewport().installEventFilter(self)
         root.addWidget(scroll, 1)
         self._picker = self._build_picker()
-        root.addWidget(self._picker, 1)
+        root.addWidget(self._picker, 0)
         self._picker.setVisible(False)
         self._bound = True
         self._current_model = ""
@@ -1400,7 +1400,6 @@ class ChatPane(QWidget):
         bound = bool(current_id)
         self._bound = bound
         self._picker.setVisible(not bound)
-        self._scroll.setVisible(bound)
         self._input_box.setVisible(bound)
         for widget in (
             self._model_combo,

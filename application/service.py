@@ -1778,7 +1778,7 @@ class ApplicationService:
         if not base or session_id is None:
             return base
         info = self.get_session(session_id)
-        if info is None or not info.llm_profile_id:
+        if info is None:
             return ""
         return f"{base.rstrip('/')}/{session_id}"
 
@@ -2193,8 +2193,6 @@ class ApplicationService:
         info = self.get_session(session_id)
         if info is None:
             return refusal_reason("сессия не найдена")
-        if not lounge_tab_id(origin) and not info.llm_profile_id:
-            return refusal_reason("у активной сессии нет чата для подтверждения")
         if self.session_state(session_id) != "ready":
             return refusal_reason("сессия не готова принять команду")
         allow = self._command_allow

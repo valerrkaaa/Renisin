@@ -2306,38 +2306,36 @@ class MainWindow(QMainWindow):
         self._set_split_gap(self._chat_panel_open)
         current = info.llm_profile_id or ""
         self.chat_pane.set_models(self._chat_model_items(current), current)
+        messages = []
+        try:
+            history = self._service.get_history(session_id)
+        except Exception:
+            history = []
+        for event in history:
+            if event.event_type == domain.EventType.CHAT_CLEAR:
+                messages = []
+                continue
+            if event.event_type == domain.EventType.CHAT_OS:
+                messages.append(("os", event.payload))
+            elif event.event_type == domain.EventType.CHAT_USER:
+                messages.append(("user", event.payload))
+            elif event.event_type == domain.EventType.CHAT_ASSISTANT:
+                messages.append(("assistant", event.payload))
+            elif event.event_type == domain.EventType.CHAT_RESET:
+                messages.append(("reset", ""))
+            elif event.event_type == domain.EventType.CHAT_TOOL:
+                messages.append(("result", event.payload))
+        self.chat_pane.set_messages(messages)
         if current:
-            messages = []
-            try:
-                history = self._service.get_history(session_id)
-            except Exception:
-                history = []
-            for event in history:
-                if event.event_type == domain.EventType.CHAT_CLEAR:
-                    messages = []
-                    continue
-                if event.event_type == domain.EventType.CHAT_OS:
-                    messages.append(("os", event.payload))
-                elif event.event_type == domain.EventType.CHAT_USER:
-                    messages.append(("user", event.payload))
-                elif event.event_type == domain.EventType.CHAT_ASSISTANT:
-                    messages.append(("assistant", event.payload))
-                elif event.event_type == domain.EventType.CHAT_RESET:
-                    messages.append(("reset", ""))
-                elif event.event_type == domain.EventType.CHAT_TOOL:
-                    messages.append(("result", event.payload))
-            self.chat_pane.set_messages(messages)
             self._show_chat_context(session_id)
-            waiting = session_id in self._chat_wait
-            self.chat_pane.set_thinking(waiting)
-            self.chat_pane.set_busy(waiting)
-            self.chat_pane.set_input_text(self._chat_drafts.get(session_id, ""))
-            self.chat_pane.set_problem(self._chat_problem(session_id, info))
-            self._show_pending_mcp(session_id)
         else:
-            self.chat_pane.set_thinking(False)
-            self.chat_pane.set_busy(False)
-            self.chat_pane.set_problem("")
+            self.chat_pane.set_context("")
+        waiting = session_id in self._chat_wait
+        self.chat_pane.set_thinking(waiting)
+        self.chat_pane.set_busy(waiting)
+        self.chat_pane.set_input_text(self._chat_drafts.get(session_id, "") if current else "")
+        self.chat_pane.set_problem(self._chat_problem(session_id, info) if current else "")
+        self._show_pending_mcp(session_id)
         if self._chat_panel_open and opening:
             self._match_chat_column()
             if not current:
@@ -3281,9 +3279,6 @@ class MainWindow(QMainWindow):
                 finish(CommandAnswer("reject_reason", "вкладка общего чата не найдена"))
                 return
             self._enqueue_mcp(prompt.origin_id, prompt, finish)
-            return
-        if not info.llm_profile_id:
-            finish(CommandAnswer("reject_reason", "у активной сессии нет чата для подтверждения"))
             return
         self._enqueue_mcp(prompt.session_id, prompt, finish)
 

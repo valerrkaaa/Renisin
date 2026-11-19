@@ -574,10 +574,9 @@ class McpCommandTests(unittest.TestCase):
         self.assertEqual(gate.asks[0].command, "ls")
         plain = service.create_session("без модели", "pw")
         service.set_foreground_session(plain.session_id)
-        self.assertEqual(
-            service.run_foreground_mcp("посмотреть", "ls"),
-            refusal_reason("у активной сессии нет чата для подтверждения"),
-        )
+        without_model = service.run_foreground_mcp("посмотреть", "ls")
+        self.assertNotIn("нет чата", without_model)
+        self.assertEqual(gate.asks[-1].session_id, plain.session_id)
         origin = lounge_origin("tab-1")
         gate.answer = CommandAnswer("reject")
         self.assertEqual(
@@ -1023,6 +1022,7 @@ class ToolLoopTests(unittest.TestCase):
         service, _driver, profiles = _world()
         first = _session(service, profiles)
         second = service.create_session("другая", "pw", llm_profile_id="m-1")
+        plain = service.create_session("без модели", "pw")
         seen = []
         service.set_command_approver(
             lambda prompt: seen.append(prompt) or CommandAnswer("reject")
@@ -1038,6 +1038,10 @@ class ToolLoopTests(unittest.TestCase):
             self.assertNotEqual(
                 service.mcp_endpoint(first.session_id),
                 service.mcp_endpoint(second.session_id),
+            )
+            self.assertEqual(
+                service.mcp_endpoint(plain.session_id),
+                f"{base}/{plain.session_id}",
             )
             listed = _post(
                 f"{base}/{second.session_id}",
@@ -1679,6 +1683,33 @@ class ChatCardTests(unittest.TestCase):
         output = label.parent().findChild(QTextEdit, "commandOutput")
         self.assertEqual(command.toPlainText(), "dir %USERPROFILE%")
         self.assertIn("a.txt", output.toPlainText())
+        window.close()
+
+    def test_approval_card_appears_without_a_model(self) -> None:
+        from PySide6.QtWidgets import QApplication, QPushButton
+
+        from application.terminal_mcp import CommandAsk
+        from ui.main_window import MainWindow
+
+        service, _driver, _profiles = _world()
+        info = service.create_session("без модели", "pw")
+        window = MainWindow(service)
+        window.show()
+        window._activate_session(info.session_id)
+        QApplication.processEvents()
+        window._present_mcp((
+            CommandAsk("no-model", info.session_id, "список", "ls"),
+            lambda _answer: None,
+        ))
+        QApplication.processEvents()
+        self.assertIn(info.session_id, window._mcp_pending)
+        run = next(
+            button
+            for button in window.chat_pane.findChildren(QPushButton)
+            if button.text() == "Выполнить"
+        )
+        self.assertFalse(run.isHidden())
+        self.assertFalse(window.chat_pane._scroll.isHidden())
         window.close()
 
     def test_expanded_call_uses_the_chat_scroll(self) -> None:

@@ -57,7 +57,7 @@ class SessionSettingsDialog(QDialog):
         self._username = QLineEdit(info.username)
         self._username.setPlaceholderText("Определится при запуске терминала")
         form.addRow("Username", self._username)
-        self._url = QLineEdit(mcp_url or "Появится после выбора модели")
+        self._url = QLineEdit(mcp_url or "Появится после запуска терминала")
         self._url.setReadOnly(True)
         form.addRow("Адрес MCP", self._url)
         layout.addLayout(form)
